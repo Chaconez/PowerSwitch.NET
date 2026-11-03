@@ -48,7 +48,8 @@ function Invoke-Build {
         [string]$OutputType,          # winexe / exe
         [string[]]$ExtraReferences,
         [string[]]$ExtraResources,
-        [string]$IconPath
+        [string]$IconPath,
+        [string]$ManifestPath
     )
 
     $sources = @(Get-ChildItem $ProjectDir -Filter '*.cs' -Recurse |
@@ -73,6 +74,8 @@ function Invoke-Build {
         $args += '/define:TRACE'
     }
     if ($IconPath -and (Test-Path $IconPath)) { $args += "/win32icon:$IconPath" }
+    # 自定义 manifest：声明 DPI 感知（否则 200% 缩放下整个窗口被位图放大，文字发虚）
+    if ($ManifestPath -and (Test-Path $ManifestPath)) { $args += "/win32manifest:$ManifestPath" }
 
     foreach ($r in $refs) {
         $p = Join-Path $fwDir $r
@@ -106,7 +109,8 @@ Invoke-Build -ProjectDir $srcDir `
              -OutputType 'winexe' `
              -ExtraReferences @('System.Windows.Forms.dll', 'System.Drawing.dll') `
              -ExtraResources $icons `
-             -IconPath (Join-Path $srcDir 'icons\icon-balanced.ico')
+             -IconPath (Join-Path $srcDir 'icons\icon-balanced.ico') `
+             -ManifestPath (Join-Path $srcDir 'app.manifest')
 
 # ---------- 看门狗 ----------
 if (Test-Path $wdDir) {

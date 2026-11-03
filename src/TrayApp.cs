@@ -39,6 +39,7 @@ namespace PowerSwitch
         private int _lastShellPid;
         private bool _disposed;
         private bool _ticking;
+        private SettingsForm _settingsForm;
 
         public TrayApp()
         {
@@ -423,21 +424,41 @@ namespace PowerSwitch
         {
             SafeUi(delegate
             {
+                // 单实例守卫：ShowDialog 跑的是嵌套消息循环，托盘菜单点击仍会被派发，
+                // 连点几次就会叠出好几个设置窗口（旧版 PowerShell 踩过同样的坑）。
+                if (_settingsForm != null && !_settingsForm.IsDisposed)
+                {
+                    try
+                    {
+                        if (_settingsForm.WindowState == FormWindowState.Minimized)
+                        {
+                            _settingsForm.WindowState = FormWindowState.Normal;
+                        }
+                        _settingsForm.Activate();
+                        _settingsForm.BringToFront();
+                    }
+                    catch { }
+                    return;
+                }
+
                 try
                 {
-                    using (SettingsForm form = new SettingsForm(_engine))
-                    {
-                        Logger.Info("设置窗口已打开");
-                        form.ShowDialog();
-                        Logger.Info("设置窗口已关闭");
-                    }
-                    ApplyIcon();
-                    UpdateTooltip();
+                    _settingsForm = new SettingsForm(_engine);
+                    Logger.Info("设置窗口已打开");
+                    _settingsForm.ShowDialog();
+                    Logger.Info("设置窗口已关闭");
                 }
                 catch (Exception ex)
                 {
                     Logger.Error("打开设置窗口失败", ex);
                     MessageBox.Show("打开设置窗口失败：" + ex.Message, "PowerSwitch", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally
+                {
+                    try { if (_settingsForm != null) { _settingsForm.Dispose(); } } catch { }
+                    _settingsForm = null;
+                    ApplyIcon();
+                    UpdateTooltip();
                 }
             });
         }

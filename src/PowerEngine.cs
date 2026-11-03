@@ -88,6 +88,22 @@ namespace PowerSwitch
             get { lock (_sync) { return _lastTick; } }
         }
 
+        /// <summary>当前负载判定："Low" / "High" / null（还没采样或已清空）。</summary>
+        public string CurrentLoadState
+        {
+            get { lock (_sync) { return _lastLoadState; } }
+        }
+
+        public DateTime? LowSince
+        {
+            get { lock (_sync) { return _lowSince; } }
+        }
+
+        public DateTime? HighSince
+        {
+            get { lock (_sync) { return _highSince; } }
+        }
+
         public bool IsPaused
         {
             get { return File.Exists(_pausePath); }
@@ -339,6 +355,11 @@ namespace PowerSwitch
             // —— 远程操作时被降到节能档会让整台机器明显卡顿，这是比"保持手动选择"更强的约束。
             if (_rdpActive && cfg.PauseOnRemoteDesktop)
             {
+                // 锁定期间照样采一次 CPU：设置窗口的状态条要用它，
+                // 不采的话会一直显示 "--"，看起来像程序卡住了。
+                double rdCpu = SampleAverage(cfg);
+                if (rdCpu >= 0) { _lastCpu = rdCpu; }
+
                 if (current != cfg.RemoteDesktopMode)
                 {
                     Logger.Info("远程桌面连接中 - 强制切换到 " + PowerScheme.DisplayName(cfg.RemoteDesktopMode));

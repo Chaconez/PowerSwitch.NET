@@ -13,6 +13,7 @@
     <DebugType>none</DebugType>
     <Optimize>true</Optimize>
     <ApplicationIcon>icons\icon-balanced.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <LangVersion>5</LangVersion>
   </PropertyGroup>
 
