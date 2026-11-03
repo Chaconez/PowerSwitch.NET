@@ -350,7 +350,7 @@ Remove-Item C:\ProgramData\PowerSwitch -Recurse -Force
 | 版本 | 目标运行时 | exe 体积 | 目标机依赖 |
 |---|---|---|---|
 | `v1.2.0`（当前） | .NET 8（框架依赖 + 单文件） | 1.15 MB | 需装 Desktop Runtime 8.x |
-| [`v1.1.2`](https://github.com/Chaconez/PowerSwitch.NET/releases/tag/v1.1.2) | .NET Framework 4.0 | 866 KB | 无，Windows 自带 |
+| [`v1.1.2`](https://github.com/Chaconez/PowerSwitch.NET/tree/v1.1.2) | .NET Framework 4.0 | 866 KB | 无，Windows 自带 |
 
 功能上两版等价，差别只在运行时。之所以迁到 .NET 8：能直接用现代 C#、`dotnet publish` 一条命令出单文件、不用再维护手写 `csc.exe` 调用链。代价是目标机多了 55 MB 运行时这一前提 —— 如果这个前提不能接受，用 `v1.1.2` 就好。
 
