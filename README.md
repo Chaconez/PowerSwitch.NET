@@ -4,7 +4,7 @@
 >
 > 这是 [PowerSwitch](https://github.com/Chaconez/PowerSwitch)（PowerShell 版）的 **C# 重写版**，为彻底解决「托盘图标反复丢失」而做。
 
-C# / .NET Framework 4.8 · WinForms · 单进程 · 零安装依赖
+C# / .NET Framework 4.8 · WinForms · 单进程 · 零安装依赖 · 远程桌面联动
 
 ---
 
@@ -75,9 +75,52 @@ C# / .NET Framework 4.8 · WinForms · 单进程 · 零安装依赖
 
 ---
 
+## 远程桌面联动（v1.1）
+
+NAS 平时空载跑节能档没问题，但**远程连进来干活的时候被限频**就很难受。所以加了一条硬规则：
+
+```
+外部机器 RDP 连入  →  立即切换到「平衡」，冻结自动切换
+外部机器 RDP 断开  →  清除防抖计时，自动切换重新接管
+```
+
+判定依据不是"本机有没有 mstsc 进程"（那只说明往外连），而是直接问终端服务：枚举所有会话，**状态 = 活动 且 客户端协议 = RDP** 才算远程连接。这样本机物理登录、控制台会话都不会误触发。
+
+两条检测通道并行，互为兜底：
+
+| 通道 | 延迟 | 作用 |
+|---|---|---|
+| `WTSRegisterSessionNotification` | ~0.4 秒 | 系统在会话变化时主动推消息，负责"立即" |
+| 定时轮询（默认 3 秒） | ≤3 秒 | 进程启动前就已连上、消息丢失、跨会话通知不到时兜底 |
+
+优先级（`PowerEngine` 里就这三层，从上到下）：
+
+```
+① 远程桌面连接中  → 锁定 RemoteDesktopMode，什么都不做
+② 手动暂停标志    → 什么都不做
+③ 自动逻辑        → 白天固定 / 夜间按负载防抖
+```
+
+> 远程桌面**压过**手动暂停：远程操作时被降到节能档会让整台机器明显卡顿，这个约束比"保持手动选择"更强。暂停标志本身不会被清掉，断开后照旧生效。
+
+日志里能直接看到全过程：
+
+```
+15:55:06 远程桌面状态变化: 已连接 Administrator@zhangwenjiedeMa（会话 3）
+15:55:06 检测到远程桌面连接：... 立即切换到 平衡 并暂停自动切换
+15:58:09 远程桌面连接中 - 强制切换到 平衡          ← 有人手动改档也会被拉回
+15:58:30 远程桌面状态变化: 已断开
+15:58:31 远程桌面已断开，恢复自动切换
+```
+
+托盘提示会显示「· 远程桌面」，右键菜单顶部多一行只读状态「远程桌面已连接 · 自动切换已暂停」。
+
+---
+
 ## 特性
 
 - **单进程**：托盘、采样、切换、设置窗口都在一个 exe 里，内存约 39 MB（旧版 128 MB）
+- **远程桌面联动**：外部机器 RDP 连入立即锁定平衡方案并暂停自动切换，断开后自动恢复
 - **直接调 API**：`PowerSetActiveScheme` 一步到位，不再每次 spawn 一个 `powercfg.exe`
 - **防抖状态机**：低负载需持续 N 分钟才降档，高负载 N 分钟才升档，避免阈值附近反复横跳
 - **状态持久化**：防抖计时写入 `power_switch_state.json`，进程重启不丢进度
@@ -142,16 +185,22 @@ CreateObject("WScript.Shell").Run """C:\ProgramData\PowerSwitch\PowerSwitch.exe"
 | `DayMode` | `Balanced` | 白天固定方案（仅 `AllDayMonitor=false` 时生效） |
 | `NightLowLoadMode` | `PowerSaver` | 低负载目标方案 |
 | `NightHighLoadMode` | `Balanced` | 高负载目标方案 |
+| `PauseOnRemoteDesktop` | `true` | 远程桌面连接时锁定方案并暂停自动切换 |
+| `RemoteDesktopMode` | `Balanced` | 远程桌面期间锁定到哪个方案 |
+| `RdpPollSeconds` | `3` | 远程桌面状态轮询间隔（秒），1–60 |
 
 **决策逻辑**：
 
 ```
-useLoadLogic = AllDayMonitor || 当前处于夜间时段
+① 远程桌面连接中（PauseOnRemoteDesktop=true）→ 锁定 RemoteDesktopMode，结束
+② automation.paused 存在且未到期              → 保持现状，结束
+③ 自动逻辑：
+   useLoadLogic = AllDayMonitor || 当前处于夜间时段
 
-├─ false（白天且未开全天监控）→ 固定 DayMode
-└─ true → 按 CPU 负载走防抖状态机
-     ├─ 低负载持续 LowLoadDuration 分钟 → NightLowLoadMode
-     └─ 高负载持续 HighLoadDuration 分钟 → NightHighLoadMode
+   ├─ false（白天且未开全天监控）→ 固定 DayMode
+   └─ true → 按 CPU 负载走防抖状态机
+        ├─ 低负载持续 LowLoadDuration 分钟 → NightLowLoadMode
+        └─ 高负载持续 HighLoadDuration 分钟 → NightHighLoadMode
 ```
 
 **电源方案 GUID**（系统固定值）：
@@ -258,8 +307,9 @@ PowerSwitch/
 ├── src/                          # 主程序
 │   ├── Program.cs                # 入口：单实例、全局异常兜底
 │   ├── TrayApp.cs                # 托盘、菜单、TaskbarCreated 恢复
-│   ├── PowerEngine.cs            # 采样 + 防抖状态机
+│   ├── PowerEngine.cs            # 采样 + 防抖状态机 + 远程桌面覆盖
 │   ├── PowerNative.cs            # P/Invoke：电源 API、CPU 采样
+│   ├── RdpMonitor.cs             # 远程桌面会话检测（WTS API + 会话变更通知）
 │   ├── PowerScheme.cs            # 方案 GUID 与名称映射
 │   ├── AppConfig.cs              # 配置模型 + 扁平 JSON 读写
 │   ├── SettingsForm.cs           # 设置窗口

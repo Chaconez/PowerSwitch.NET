@@ -26,6 +26,13 @@ namespace PowerSwitch
         public string NightLowLoadMode = "PowerSaver";
         public string NightHighLoadMode = "Balanced";
 
+        /// <summary>远程桌面连接时锁定方案并暂停自动切换。</summary>
+        public bool PauseOnRemoteDesktop = true;
+        /// <summary>远程桌面连接期间锁定到哪个方案。</summary>
+        public string RemoteDesktopMode = "Balanced";
+        /// <summary>远程桌面状态轮询间隔（秒）。事件通知之外的兜底频率。</summary>
+        public int RdpPollSeconds = 3;
+
         public AppConfig Clone()
         {
             AppConfig c = new AppConfig();
@@ -42,6 +49,9 @@ namespace PowerSwitch
             c.DayMode = DayMode;
             c.NightLowLoadMode = NightLowLoadMode;
             c.NightHighLoadMode = NightHighLoadMode;
+            c.PauseOnRemoteDesktop = PauseOnRemoteDesktop;
+            c.RemoteDesktopMode = RemoteDesktopMode;
+            c.RdpPollSeconds = RdpPollSeconds;
             return c;
         }
 
@@ -60,6 +70,8 @@ namespace PowerSwitch
             DayMode = PowerScheme.NormalizeName(DayMode, "Balanced");
             NightLowLoadMode = PowerScheme.NormalizeName(NightLowLoadMode, "PowerSaver");
             NightHighLoadMode = PowerScheme.NormalizeName(NightHighLoadMode, "Balanced");
+            RemoteDesktopMode = PowerScheme.NormalizeName(RemoteDesktopMode, "Balanced");
+            RdpPollSeconds = Clamp(RdpPollSeconds, 1, 60, 3);
         }
 
         private static int Clamp(int v, int min, int max, int fallback)
@@ -97,6 +109,9 @@ namespace PowerSwitch
                 cfg.DayMode = GetString(map, "DayMode", cfg.DayMode);
                 cfg.NightLowLoadMode = GetString(map, "NightLowLoadMode", cfg.NightLowLoadMode);
                 cfg.NightHighLoadMode = GetString(map, "NightHighLoadMode", cfg.NightHighLoadMode);
+                cfg.PauseOnRemoteDesktop = GetBool(map, "PauseOnRemoteDesktop", cfg.PauseOnRemoteDesktop);
+                cfg.RemoteDesktopMode = GetString(map, "RemoteDesktopMode", cfg.RemoteDesktopMode);
+                cfg.RdpPollSeconds = GetInt(map, "RdpPollSeconds", cfg.RdpPollSeconds);
             }
             catch (Exception ex)
             {
@@ -125,7 +140,10 @@ namespace PowerSwitch
                 AppendInt(sb, "TrayRefreshSec", cfg.TrayRefreshSec, true);
                 AppendRaw(sb, "DayMode", Quote(cfg.DayMode), true);
                 AppendRaw(sb, "NightLowLoadMode", Quote(cfg.NightLowLoadMode), true);
-                AppendRaw(sb, "NightHighLoadMode", Quote(cfg.NightHighLoadMode), false);
+                AppendRaw(sb, "NightHighLoadMode", Quote(cfg.NightHighLoadMode), true);
+                AppendRaw(sb, "PauseOnRemoteDesktop", cfg.PauseOnRemoteDesktop ? "true" : "false", true);
+                AppendRaw(sb, "RemoteDesktopMode", Quote(cfg.RemoteDesktopMode), true);
+                AppendInt(sb, "RdpPollSeconds", cfg.RdpPollSeconds, false);
                 sb.AppendLine("}");
 
                 string dir = Path.GetDirectoryName(path);

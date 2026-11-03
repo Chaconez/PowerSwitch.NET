@@ -27,8 +27,10 @@ namespace PowerSwitch
         private readonly System.Windows.Forms.Timer _uiTimer;
         private readonly SynchronizationContext _uiContext;
         private readonly TaskbarWatcher _watcher;
+        private readonly RdpMonitor _rdp;
 
         private readonly ToolStripMenuItem _miStatus;
+        private readonly ToolStripMenuItem _miRdp;
         private readonly ToolStripMenuItem _miPause;
         private readonly ToolStripMenuItem _miResume;
         private readonly ToolStripMenuItem _miPauseUntil;
@@ -44,7 +46,7 @@ namespace PowerSwitch
             _engine = new PowerEngine(Paths.DataDir);
             _engine.Changed += OnEngineChanged;
 
-            _menu = BuildMenu(out _miStatus, out _miPause, out _miResume, out _miPauseUntil);
+            _menu = BuildMenu(out _miStatus, out _miRdp, out _miPause, out _miResume, out _miPauseUntil);
             _menu.Opening += OnMenuOpening;
 
             _icon = new NotifyIcon();
@@ -59,6 +61,11 @@ namespace PowerSwitch
             // 响应任务栏重建（explorer 崩溃/重启后图标会集体消失，这是最常见的"图标丢失"）
             int taskbarMsg = PowerNative.TaskbarCreatedMessage();
             _watcher = new TaskbarWatcher(taskbarMsg, delegate { RestoreIcon("收到 TaskbarCreated"); });
+
+            // 远程桌面监控：外部机器连进来就锁定方案，断开后恢复自动切换。
+            // 独立于 60 秒的引擎周期，否则"立即切换"根本谈不上。
+            _rdp = new RdpMonitor(_engine.Config.RdpPollSeconds);
+            _rdp.Changed += OnRdpChanged;
 
             // 后台线程跑引擎：采样会阻塞数秒，绝不能在 UI 线程上做
             _tickTimer = new System.Threading.Timer(OnTickTimer, null, 3000, 60000);
@@ -95,7 +102,7 @@ namespace PowerSwitch
 
         public PowerEngine Engine { get { return _engine; } }
 
-        private ContextMenuStrip BuildMenu(out ToolStripMenuItem miStatus, out ToolStripMenuItem miPause, out ToolStripMenuItem miResume, out ToolStripMenuItem miPauseUntil)
+        private ContextMenuStrip BuildMenu(out ToolStripMenuItem miStatus, out ToolStripMenuItem miRdp, out ToolStripMenuItem miPause, out ToolStripMenuItem miResume, out ToolStripMenuItem miPauseUntil)
         {
             ContextMenuStrip menu = new ContextMenuStrip();
             menu.ShowImageMargin = false;
@@ -103,6 +110,12 @@ namespace PowerSwitch
             miStatus = new ToolStripMenuItem("正在读取状态…");
             miStatus.Enabled = false;
             menu.Items.Add(miStatus);
+
+            miRdp = new ToolStripMenuItem("远程桌面已连接");
+            miRdp.Enabled = false;
+            miRdp.Visible = false;
+            menu.Items.Add(miRdp);
+
             menu.Items.Add(new ToolStripSeparator());
 
             ToolStripMenuItem miSettings = new ToolStripMenuItem("设置…");
@@ -172,8 +185,14 @@ namespace PowerSwitch
             try
             {
                 bool paused = _engine.IsPaused;
+                bool rdp = _engine.IsRemoteOverrideActive;
                 _miPause.Visible = !paused;
                 _miResume.Visible = paused;
+                _miRdp.Visible = rdp;
+                if (rdp)
+                {
+                    _miRdp.Text = "远程桌面已连接 · 自动切换已暂停";
+                }
                 _miStatus.Text = BuildStatusText();
             }
             catch (Exception ex)
@@ -186,7 +205,10 @@ namespace PowerSwitch
         {
             string mode = PowerScheme.DisplayName(_engine.CurrentKey);
             string cpu = _engine.LastCpu >= 0 ? _engine.LastCpu.ToString("F0") + "%" : "--";
-            return "当前：" + mode + "　CPU " + cpu;
+            string extra = "";
+            if (_engine.IsRemoteOverrideActive) { extra = "　· 远程桌面"; }
+            else if (_engine.IsPaused) { extra = "　· 已暂停"; }
+            return "当前：" + mode + "　CPU " + cpu + extra;
         }
 
         private void OnTickTimer(object state)
@@ -222,6 +244,43 @@ namespace PowerSwitch
             UpdateTooltip();
             CheckShellRestart();
             CheckControlRequest();
+            SyncRdpPoll();
+        }
+
+        /// <summary>设置里改了检测间隔就跟着调整，不用重启进程。</summary>
+        private void SyncRdpPoll()
+        {
+            try
+            {
+                int want = _engine.Config.RdpPollSeconds;
+                if (_rdp != null && _rdp.PollSeconds != want) { _rdp.SetPollInterval(want); }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("同步远程桌面检测间隔失败: " + Logger.Describe(ex));
+            }
+        }
+
+        /// <summary>
+        /// 远程桌面状态变化回调（后台线程）。连接要"立即"切换，所以直接在这里推给引擎，
+        /// 不等 60 秒的引擎周期；断开后顺手踢一次 Tick，让负载逻辑马上重新接管。
+        /// </summary>
+        private void OnRdpChanged(object sender, EventArgs e)
+        {
+            try
+            {
+                RdpSessionInfo info = _rdp.Current;
+                _engine.SetRemoteDesktopActive(info.Active, info.Describe());
+
+                if (!info.Active)
+                {
+                    ThreadPool.QueueUserWorkItem(delegate { OnTickTimer(null); });
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("处理远程桌面状态变化失败", ex);
+            }
         }
 
         /// <summary>
@@ -246,7 +305,7 @@ namespace PowerSwitch
         private void ApplyIcon()
         {
             Icon target;
-            if (_engine.IsPaused) { target = LoadIcon("paused"); }
+            if (_engine.IsPaused && !_engine.IsRemoteOverrideActive) { target = LoadIcon("paused"); }
             else
             {
                 string key = _engine.CurrentKey;
@@ -268,7 +327,9 @@ namespace PowerSwitch
             try
             {
                 string mode = PowerScheme.DisplayName(_engine.CurrentKey);
-                string state = _engine.IsPaused ? "（已暂停）" : "";
+                string state = "";
+                if (_engine.IsRemoteOverrideActive) { state = " · 远程桌面"; }
+                else if (_engine.IsPaused) { state = "（已暂停）"; }
                 string cpu = _engine.LastCpu >= 0 ? " CPU " + _engine.LastCpu.ToString("F0") + "%" : "";
                 string text = "PowerSwitch · " + mode + state + cpu;
                 if (text.Length > 63) { text = text.Substring(0, 63); }
@@ -392,7 +453,8 @@ namespace PowerSwitch
                     "PowerSwitch " + version + Environment.NewLine +
                     "电源计划自动切换（C# 版）" + Environment.NewLine + Environment.NewLine +
                     "按 CPU 负载与夜间时段，自动在节能 / 平衡 / 高性能之间切换，" +
-                    "降低 NAS 空载待机功耗。" + Environment.NewLine + Environment.NewLine +
+                    "降低 NAS 空载待机功耗。" + Environment.NewLine +
+                    "检测到远程桌面连接时锁定方案并暂停自动切换，断开后自动恢复。" + Environment.NewLine + Environment.NewLine +
                     "运行目录：" + Paths.DataDir + Environment.NewLine +
                     "当前会话：" + Process.GetCurrentProcess().SessionId;
                 MessageBox.Show(text, "关于 PowerSwitch", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -472,6 +534,7 @@ namespace PowerSwitch
             if (disposing && !_disposed)
             {
                 _disposed = true;
+                try { if (_rdp != null) { _rdp.Dispose(); } } catch { }
                 try { if (_tickTimer != null) { _tickTimer.Dispose(); } } catch { }
                 try { if (_uiTimer != null) { _uiTimer.Dispose(); } } catch { }
                 try { if (_watcher != null) { _watcher.ReleaseHandle(); } } catch { }

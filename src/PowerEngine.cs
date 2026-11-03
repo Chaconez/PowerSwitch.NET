@@ -8,11 +8,14 @@ namespace PowerSwitch
     /// <summary>
     /// 电源方案决策引擎。行为与旧 PowerShell 版 SmartPowerSwitch.ps1 完全对齐：
     ///
-    ///   useLoadLogic = AllDayMonitor || 处于夜间时段
-    ///   ├─ false（白天且未开全天监控）→ 固定 DayMode
-    ///   └─ true → 按 CPU 负载走防抖状态机
-    ///        ├─ 低负载持续 LowLoadDuration 分钟 → NightLowLoadMode
-    ///        └─ 高负载持续 HighLoadDuration 分钟 → NightHighLoadMode
+    ///   优先级 0（最高）：远程桌面连接中 → 锁定 RemoteDesktopMode，不做任何自动切换
+    ///   优先级 1：手动暂停标志 → 什么都不做
+    ///   优先级 2：自动逻辑
+    ///        useLoadLogic = AllDayMonitor || 处于夜间时段
+    ///        ├─ false（白天且未开全天监控）→ 固定 DayMode
+    ///        └─ true → 按 CPU 负载走防抖状态机
+    ///             ├─ 低负载持续 LowLoadDuration 分钟 → NightLowLoadMode
+    ///             └─ 高负载持续 HighLoadDuration 分钟 → NightHighLoadMode
     ///
     /// 区别只在于：这里跑在常驻进程的定时器里，不再每分钟起一个新进程。
     /// </summary>
@@ -33,6 +36,11 @@ namespace PowerSwitch
         private DateTime _lastTick = DateTime.MinValue;
         private string _lastAction = "尚未运行";
         private DateTime _lastSummary = DateTime.MinValue;
+
+        // 远程桌面覆盖：外部机器连进来时锁定方案，断开后恢复自动切换
+        private bool _rdpActive;
+        private string _rdpClient;
+        private DateTime? _rdpSince;
 
         public PowerEngine(string baseDir)
         {
@@ -85,6 +93,28 @@ namespace PowerSwitch
             get { return File.Exists(_pausePath); }
         }
 
+        /// <summary>是否处于远程桌面连接中（原始事实，不受配置开关影响）。</summary>
+        public bool IsRemoteDesktopActive
+        {
+            get { lock (_sync) { return _rdpActive; } }
+        }
+
+        /// <summary>远程桌面覆盖当前是否生效（连接中 + 配置里开着联动）。</summary>
+        public bool IsRemoteOverrideActive
+        {
+            get { lock (_sync) { return _rdpActive && _cfg.PauseOnRemoteDesktop; } }
+        }
+
+        public string RemoteDesktopClient
+        {
+            get { lock (_sync) { return _rdpClient; } }
+        }
+
+        public DateTime? RemoteDesktopSince
+        {
+            get { lock (_sync) { return _rdpSince; } }
+        }
+
         public string PauseUntilText
         {
             get
@@ -116,11 +146,64 @@ namespace PowerSwitch
 
         public void ReloadConfig()
         {
+            string rdpTarget = null;
             lock (_sync)
             {
                 _cfg = ConfigStore.Load(_configPath);
                 Logger.Info("配置已重新载入: " + _configPath);
+                // 改完设置时远程桌面可能正连着：开关刚打开、或目标方案被换掉，都要立刻补一次
+                if (_rdpActive && _cfg.PauseOnRemoteDesktop) { rdpTarget = _cfg.RemoteDesktopMode; }
             }
+            if (rdpTarget != null)
+            {
+                Logger.Info("配置变更时远程桌面仍在连接中，重新锁定 " + PowerScheme.DisplayName(rdpTarget));
+                ApplyScheme(rdpTarget, "远程桌面锁定");
+            }
+            RaiseChanged();
+        }
+
+        /// <summary>
+        /// 由 RdpMonitor 调用。连接建立时立刻切到指定方案并冻结自动切换，
+        /// 断开时清空防抖计时，让下一次 Tick 重新按负载判断。
+        /// </summary>
+        public void SetRemoteDesktopActive(bool active, string client)
+        {
+            bool changed;
+            lock (_sync)
+            {
+                changed = _rdpActive != active;
+                _rdpActive = active;
+                _rdpClient = client;
+                if (changed) { _rdpSince = active ? DateTime.Now : (DateTime?)null; }
+            }
+            if (!changed) { return; }
+
+            AppConfig cfg = Config;
+
+            if (!active)
+            {
+                Logger.Info("远程桌面已断开，恢复自动切换");
+                lock (_sync)
+                {
+                    ClearStreaks();
+                    SetAction("远程桌面已断开，恢复自动切换");
+                }
+                RaiseChanged();
+                return;
+            }
+
+            if (!cfg.PauseOnRemoteDesktop)
+            {
+                Logger.Info("检测到远程桌面连接（" + client + "），但联动已关闭，不做处理");
+                RaiseChanged();
+                return;
+            }
+
+            Logger.Info("检测到远程桌面连接：" + client + "，立即切换到 "
+                        + PowerScheme.DisplayName(cfg.RemoteDesktopMode) + " 并暂停自动切换");
+            lock (_sync) { ClearStreaks(); }
+            ApplyScheme(cfg.RemoteDesktopMode, "远程桌面连接");
+            SaveState();
             RaiseChanged();
         }
 
@@ -235,24 +318,48 @@ namespace PowerSwitch
             lock (_sync) { cfg = _cfg.Clone(); }
 
             // 暂停标志：到期自动恢复
-            if (File.Exists(_pausePath))
+            bool paused = File.Exists(_pausePath);
+            DateTime? pauseUntil = null;
+            if (paused)
             {
-                DateTime? until = ReadPauseUntil();
-                if (until.HasValue && DateTime.Now >= until.Value)
+                pauseUntil = ReadPauseUntil();
+                if (pauseUntil.HasValue && DateTime.Now >= pauseUntil.Value)
                 {
                     try { File.Delete(_pausePath); } catch { }
                     Logger.Info("暂停已到期，恢复自动切换");
-                }
-                else
-                {
-                    SetAction(until.HasValue ? "已暂停到 " + until.Value.ToString("HH:mm") : "已暂停（手动恢复）");
-                    _lastTick = DateTime.Now;
-                    return;
+                    paused = false;
+                    pauseUntil = null;
                 }
             }
 
             RefreshCurrent();
             string current = _currentKey;
+
+            // 远程桌面优先级最高：连接期间只认 RemoteDesktopMode，连手动暂停也要让位
+            // —— 远程操作时被降到节能档会让整台机器明显卡顿，这是比"保持手动选择"更强的约束。
+            if (_rdpActive && cfg.PauseOnRemoteDesktop)
+            {
+                if (current != cfg.RemoteDesktopMode)
+                {
+                    Logger.Info("远程桌面连接中 - 强制切换到 " + PowerScheme.DisplayName(cfg.RemoteDesktopMode));
+                    ApplyScheme(cfg.RemoteDesktopMode, "远程桌面锁定");
+                }
+                else
+                {
+                    SetAction("远程桌面已连接 - 锁定 " + PowerScheme.DisplayName(cfg.RemoteDesktopMode));
+                }
+                ClearStreaks();
+                _lastTick = DateTime.Now;
+                SaveState();
+                return;
+            }
+
+            if (paused)
+            {
+                SetAction(pauseUntil.HasValue ? "已暂停到 " + pauseUntil.Value.ToString("HH:mm") : "已暂停（手动恢复）");
+                _lastTick = DateTime.Now;
+                return;
+            }
 
             bool isNight = IsNightTime(cfg, DateTime.Now);
             bool useLoadLogic = cfg.AllDayMonitor || isNight;

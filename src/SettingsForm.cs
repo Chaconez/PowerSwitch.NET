@@ -26,6 +26,9 @@ namespace PowerSwitch
         private ComboBox _dayMode;
         private ComboBox _nightLowMode;
         private ComboBox _nightHighMode;
+        private CheckBox _pauseOnRdp;
+        private ComboBox _rdpMode;
+        private NumericUpDown _rdpPoll;
 
         public SettingsForm(PowerEngine engine)
         {
@@ -45,7 +48,7 @@ namespace PowerSwitch
             MinimizeBox = false;
             ShowInTaskbar = false;
             Font = new Font("Microsoft YaHei UI", 9F);
-            ClientSize = new Size(470, 520);
+            ClientSize = new Size(470, 640);
             BackColor = Color.White;
 
             TableLayoutPanel root = new TableLayoutPanel();
@@ -83,6 +86,19 @@ namespace PowerSwitch
             _dayMode = AddCombo(root, ref row, "白天方案");
             _nightLowMode = AddCombo(root, ref row, "夜间低负载");
             _nightHighMode = AddCombo(root, ref row, "夜间高负载");
+
+            AddSection(root, ref row, "远程桌面");
+
+            _pauseOnRdp = new CheckBox();
+            _pauseOnRdp.Text = "远程连接时锁定方案并暂停自动切换";
+            _pauseOnRdp.AutoSize = true;
+            _pauseOnRdp.Margin = new Padding(3, 6, 3, 8);
+            root.Controls.Add(new Label(), 0, row);
+            root.Controls.Add(_pauseOnRdp, 1, row);
+            row++;
+
+            _rdpMode = AddCombo(root, ref row, "连接时锁定方案");
+            _rdpPoll = AddNumber(root, ref row, "检测间隔（秒）", 1, 60, 1);
 
             AddSection(root, ref row, "其它");
 
@@ -198,6 +214,9 @@ namespace PowerSwitch
             SelectCombo(_dayMode, cfg.DayMode);
             SelectCombo(_nightLowMode, cfg.NightLowLoadMode);
             SelectCombo(_nightHighMode, cfg.NightHighLoadMode);
+            _pauseOnRdp.Checked = cfg.PauseOnRemoteDesktop;
+            SelectCombo(_rdpMode, cfg.RemoteDesktopMode);
+            _rdpPoll.Value = cfg.RdpPollSeconds;
         }
 
         private static void SelectCombo(ComboBox box, string key)
@@ -246,6 +265,9 @@ namespace PowerSwitch
             cfg.DayMode = ComboKey(_dayMode);
             cfg.NightLowLoadMode = ComboKey(_nightLowMode);
             cfg.NightHighLoadMode = ComboKey(_nightHighMode);
+            cfg.PauseOnRemoteDesktop = _pauseOnRdp.Checked;
+            cfg.RemoteDesktopMode = ComboKey(_rdpMode);
+            cfg.RdpPollSeconds = (int)_rdpPoll.Value;
             cfg.Normalize();
 
             if (!ConfigStore.Save(Paths.ConfigFile, cfg))

@@ -36,6 +36,7 @@
     <Compile Include="PowerNative.cs" />
     <Compile Include="PowerScheme.cs" />
     <Compile Include="Program.cs" />
+    <Compile Include="RdpMonitor.cs" />
     <Compile Include="SettingsForm.cs" />
     <Compile Include="TrayApp.cs" />
   </ItemGroup>
