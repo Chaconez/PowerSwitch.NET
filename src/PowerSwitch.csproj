@@ -1,65 +1,49 @@
-<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<Project Sdk="Microsoft.NET.Sdk">
+
   <!--
-    这个 csproj 主要给 Visual Studio / Rider 打开用。
-    命令行构建请走 build\build.ps1（它直接调用 Framework 自带编译器，
-    不依赖 Roslyn 组件 —— 精简安装的 VS 往往缺 Roslyn，MSBuild 会报 MSB4019）。
+    PowerSwitch 主程序（托盘 + 设置窗口）。
+
+    目标框架 net8.0-windows / 框架依赖发布：
+      · 目标机需装 .NET 8 Desktop Runtime（WindowsDesktop.App 8.x）
+      · 发布产物是单个 exe（PublishSingleFile），体积约 400 KB
+
+    版本与描述写在下面，由 SDK 生成 AssemblyInfo。
+    不要再设 GenerateAssemblyInfo=false —— 那会连带丢掉 SDK 注入的
+    [assembly: SupportedOSPlatform("windows7.0")]，导致每个 WinForms API
+    都被 CA1416 判为「仅 Windows 支持」而刷出数百条告警。
   -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFrameworkVersion>v4.0</TargetFrameworkVersion>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>PowerSwitch</AssemblyName>
     <RootNamespace>PowerSwitch</RootNamespace>
-    <OutputPath>..\build\out\</OutputPath>
-    <DebugType>none</DebugType>
-    <Optimize>true</Optimize>
     <ApplicationIcon>icons\icon-balanced.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <LangVersion>5</LangVersion>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+
+    <!-- 程序集信息 -->
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
+    <Product>PowerSwitch</Product>
+    <Title>PowerSwitch</Title>
+    <Description>NAS 电源计划自动切换：按 CPU 负载与夜间时段在节能/平衡/高性能间切换，远程桌面连接时自动锁定方案</Description>
+    <ComVisible>false</ComVisible>
+
+    <!-- 发布：框架依赖 + 单文件 -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <DebugType>none</DebugType>
+    <PublishDir>..\build\out\</PublishDir>
   </PropertyGroup>
 
-  <PropertyGroup Condition="!Exists('$(TargetFrameworkDirectory)')">
-    <FrameworkPathOverride>C:\Windows\Microsoft.NET\Framework64\v4.0.30319</FrameworkPathOverride>
-  </PropertyGroup>
-
   <ItemGroup>
-    <Reference Include="System" />
-    <Reference Include="System.Core" />
-    <Reference Include="System.Windows.Forms" />
-    <Reference Include="System.Drawing" />
+    <!-- 图标以嵌入资源形式打包，逻辑名与 AppIcon.cs 里的字符串必须一致 -->
+    <EmbeddedResource Include="icons\*.ico" LogicalName="PowerSwitch.icons.%(Filename)%(Extension)" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Compile Include="AssemblyInfo.cs" />
-    <Compile Include="AppConfig.cs" />
-    <Compile Include="AppIcon.cs" />
-    <Compile Include="Logger.cs" />
-    <Compile Include="Paths.cs" />
-    <Compile Include="PowerEngine.cs" />
-    <Compile Include="PowerNative.cs" />
-    <Compile Include="PowerScheme.cs" />
-    <Compile Include="Program.cs" />
-    <Compile Include="RdpMonitor.cs" />
-    <Compile Include="SettingsForm.cs" />
-    <Compile Include="TrayApp.cs" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <EmbeddedResource Include="icons\icon-saver.ico">
-      <LogicalName>PowerSwitch.icons.icon-saver.ico</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="icons\icon-balanced.ico">
-      <LogicalName>PowerSwitch.icons.icon-balanced.ico</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="icons\icon-high.ico">
-      <LogicalName>PowerSwitch.icons.icon-high.ico</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="icons\icon-paused.ico">
-      <LogicalName>PowerSwitch.icons.icon-paused.ico</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="icons\icon-unknown.ico">
-      <LogicalName>PowerSwitch.icons.icon-unknown.ico</LogicalName>
-    </EmbeddedResource>
-  </ItemGroup>
-
-  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

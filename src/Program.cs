@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -17,6 +18,19 @@ namespace PowerSwitch
         [STAThread]
         private static void Main(string[] args)
         {
+            // 必须在创建任何窗口句柄之前调用。SystemAware 等价于旧清单里的
+            // dpiAware=true + dpiAwareness=system：程序自己按真实 DPI 缩放，
+            // 否则 200% 屏幕上 Windows 会把整窗按 96dpi 渲染再位图放大，文字发虚。
+            try
+            {
+                Application.SetHighDpiMode(HighDpiMode.SystemAware);
+            }
+            catch (Exception ex)
+            {
+                Logger.Init(Paths.LogFile, 5);
+                Logger.Warn("设置 DPI 模式失败（继续启动）: " + Logger.Describe(ex));
+            }
+
             bool createdNew = false;
             Mutex mutex = null;
             try
@@ -64,7 +78,7 @@ namespace PowerSwitch
             try
             {
                 string version = Assembly.GetExecutingAssembly().GetName().Version.ToString();
-                Logger.Info("========== PowerSwitch " + version + " (C# / .NET Framework) ==========");
+                Logger.Info("========== PowerSwitch " + version + " (" + RuntimeInformation.FrameworkDescription + ") ==========");
                 Logger.Info("工作目录: " + Paths.DataDir);
                 Logger.Info("会话 ID: " + Process.GetCurrentProcess().SessionId);
 

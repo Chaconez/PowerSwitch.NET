@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    PowerSwitch 看门狗：SYSTEM 身份的计划任务，每 15 秒确认活动会话里有托盘进程，
+    没有就用 WTSQueryUserToken + CreateProcessAsUser 跨会话拉起。
+
+    控制台程序，不引 WinForms，所以只依赖 NETCore.App，比主程序更轻。
+    框架依赖发布：目标机需 .NET 8 Runtime（NETCore.App 8.x），装 Desktop Runtime 时已包含。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>PowerSwitchWatchdog</AssemblyName>
+    <RootNamespace>PowerSwitchWatchdog</RootNamespace>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <DebugType>none</DebugType>
+    <Version>1.2.0</Version>
+    <FileVersion>1.2.0.0</FileVersion>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <Product>PowerSwitch Watchdog</Product>
+    <Description>PowerSwitch 托盘进程看门狗</Description>
+  </PropertyGroup>
+
+</Project>

@@ -5,7 +5,7 @@
 
 ![设置窗口](docs/images/settings-window.png)
 
-C# · .NET Framework 4.8 · WinForms · 单进程 · 零安装依赖 · v1.1.2
+C# · .NET 8 · WinForms · 单进程 · 单文件发布 · v1.2.0
 
 ---
 
@@ -36,8 +36,8 @@ PowerSwitch 做的就是这件事：**看 CPU 在干什么，替你把方案切�
 | **暂停** | 30 分钟 / 1 小时 / 2 小时 / 4 小时 / 直到手动恢复 |
 | **图标自愈** | 响应 `TaskbarCreated` + 盯 shell 进程 PID，explorer 重启后图标自动回来 |
 | **进程自愈** | SYSTEM 看门狗每 15 秒检查，托盘被杀后自动拉回用户会话 |
-| **高 DPI 友好** | 声明 DPI 感知并按 `DeviceDpi` 自行缩放，200% 缩放下文字不发虚 |
-| **零安装依赖** | 目标 .NET Framework 4.8，Windows 10/11 自带；不写注册表、不装服务 |
+| **高 DPI 友好** | `Application.SetHighDpiMode(SystemAware)` + 按真实 DPI 自行缩放，200% 缩放下文字不发虚 |
+| **单文件部署** | 框架依赖 + `PublishSingleFile`，产物就是一个 exe；不写注册表、不装服务 |
 
 ---
 
@@ -94,7 +94,24 @@ PowerSwitch 做的就是这件事：**看 CPU 在干什么，替你把方案切�
 
 ## 安装
 
-**要求**：Windows 10 / 11（.NET Framework 4.8 内置），首次安装需要管理员权限。
+**要求**：Windows 10 1809+ / 11，**已装 .NET 8 Desktop Runtime**，首次安装需要管理员权限。
+
+运行时是框架依赖发布的前提。先确认：
+
+```powershell
+dotnet --list-runtimes | Select-String 'WindowsDesktop'
+# 期望看到 Microsoft.WindowsDesktop.App 8.0.x
+```
+
+没有的话装一个（约 55 MB，装完无需重启）：
+
+```powershell
+winget install Microsoft.DotNet.DesktopRuntime.8
+# 或手动下载：https://dotnet.microsoft.com/download/dotnet/8.0/runtime
+```
+
+> 看门狗以 SYSTEM 身份运行，所以运行时必须装在**机器级**位置（`C:\Program Files\dotnet`），
+> 用户级安装（`%LOCALAPPDATA%\Microsoft\dotnet`）对 SYSTEM 不可见，会导致看门狗启动失败。
 
 ```powershell
 # 1. 两个 exe 放到同一目录，推荐 C:\ProgramData\PowerSwitch\
@@ -200,7 +217,7 @@ Start-ScheduledTask -TaskName 'PowerSwitchWatchdog'
 
 ## 构建
 
-**不需要 Visual Studio，也不需要 .NET SDK。** 只要有 Windows 自带的 .NET Framework 4.x：
+需要 **.NET 8 SDK**（不是运行时），不需要 Visual Studio：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build\build.ps1
@@ -208,12 +225,23 @@ powershell -ExecutionPolicy Bypass -File build\build.ps1
 
 产物在 `build\out\`：
 
-- `PowerSwitch.exe`（约 866 KB）
-- `PowerSwitchWatchdog.exe`（约 11 KB）
+- `PowerSwitch.exe`（约 1.15 MB）
+- `PowerSwitchWatchdog.exe`（约 165 KB）
 
-构建脚本直接调用 `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe`，绕开 MSBuild 对 Roslyn 的依赖 —— 精简安装的 VS 常常缺 Roslyn 组件，用 MSBuild 会报 `MSB4019`。`src\app.manifest` 通过 `/win32manifest` 嵌入，负责声明 DPI 感知和视觉样式。
+脚本内部就是两次 `dotnet publish -c Release`，发布配置写在各自的 csproj 里：
 
-**语言版本**：C# 5（Framework 自带编译器只支持到 5.0）。所以代码里没有字符串插值、`?.`、表达式体成员。想用新语法可以装 .NET SDK 后改用 `dotnet build`，`src\PowerSwitch.csproj` 已备好。
+| 设置 | 值 | 效果 |
+|---|---|---|
+| `TargetFramework` | `net8.0-windows` | 需要 Windows 桌面运行时 |
+| `SelfContained` | `false` | 不打包运行时，体积保持在 1 MB 级 |
+| `PublishSingleFile` | `true` | 产物是单个 exe，没有一堆 dll 要跟着拷 |
+| `RuntimeIdentifier` | `win-x64` | 单文件发布必须指定 RID |
+
+两个工程共 3.6k 行，编译零告警。
+
+**关于 `app.manifest`**：它只保留视觉样式（Common-Controls v6）和 `supportedOS` 声明。高 DPI **不再**由清单声明 —— .NET 6+ 的 WinForms 要求走 `Application.SetHighDpiMode(HighDpiMode.SystemAware)`（在 `Program.Main` 第一行），清单和 API 同时设置会互相覆盖并触发 `WFAC010`。
+
+**语言版本**：C# 12（`net8.0-windows` 默认）。代码仍保持 C# 5 兼容写法（无字符串插值、无 `?.`、无表达式体成员），所以在旧编译器上也能编 —— 这是从 Framework 版迁移时保留的风格，不影响功能。
 
 ---
 
@@ -278,15 +306,16 @@ PowerSwitch/
 │   ├── SettingsForm.cs           # 设置窗口（分组卡片 + 实时状态条）
 │   ├── Logger.cs                 # 日志与轮转
 │   ├── Paths.cs                  # 路径常量
-│   ├── app.manifest              # DPI 感知 + 视觉样式
-│   ├── AssemblyInfo.cs
-│   ├── PowerSwitch.csproj
+│   ├── app.manifest              # 视觉样式 + supportedOS（DPI 改由 API 设置）
+│   ├── PowerSwitch.csproj        # net8.0-windows，框架依赖 + 单文件
 │   └── icons/                    # 5 个托盘图标（嵌入资源）
 ├── watchdog/
-│   └── Program.cs                # SYSTEM 看门狗
+│   ├── Program.cs                # SYSTEM 看门狗
+│   └── PowerSwitchWatchdog.csproj
 ├── build/
-│   └── build.ps1                 # 无 SDK 构建脚本
-└── docs/images/
+│   └── build.ps1                 # 两次 dotnet publish
+├── docs/images/
+└── LICENSE                       # MIT
 ```
 
 ---
@@ -311,10 +340,24 @@ Remove-Item C:\ProgramData\PowerSwitch -Recurse -Force
 - 省的是 **CPU 侧功耗**，量级几瓦；不会让机械硬盘停转，也不控制风扇曲线
 - 看门狗需要 SYSTEM 权限注册计划任务，首次安装需要管理员
 - 远程桌面检测基于「会话协议类型」，Hyper-V 增强会话模式也会被识别为 RDP（通常正是想要的行为）
-- 兼容性：Windows 11 ✅ 已实测（24H2）、Windows 10 ✅、Server 2019/2022 ✅ 理论可用、Windows 7/8.1 ⚠️ 需装 .NET Framework 4.8
+- 兼容性：Windows 11 ✅ 已实测（24H2）、Windows 10 1809+ ✅、Server 2019/2022 ✅ 理论可用、Windows 7/8.1 ❌（.NET 8 已不支持）
+- 需要 .NET 8 Desktop Runtime。若目标机完全不能装运行时（比如某些离线环境），请改用 git 历史里的 `v1.1.2` 标签 —— 那一版是 .NET Framework 4.0 编译的，Windows 自带即可运行
+
+---
+
+## 版本与运行时
+
+| 版本 | 目标运行时 | exe 体积 | 目标机依赖 |
+|---|---|---|---|
+| `v1.2.0`（当前） | .NET 8（框架依赖 + 单文件） | 1.15 MB | 需装 Desktop Runtime 8.x |
+| [`v1.1.2`](https://github.com/Chaconez/PowerSwitch.NET/releases/tag/v1.1.2) | .NET Framework 4.0 | 866 KB | 无，Windows 自带 |
+
+功能上两版等价，差别只在运行时。之所以迁到 .NET 8：能直接用现代 C#、`dotnet publish` 一条命令出单文件、不用再维护手写 `csc.exe` 调用链。代价是目标机多了 55 MB 运行时这一前提 —— 如果这个前提不能接受，用 `v1.1.2` 就好。
 
 ---
 
 ## 相关
 
 - [PowerSwitch（PowerShell 版）](https://github.com/Chaconez/PowerSwitch) —— 初版实现，功能等价，本仓库是为解决其托盘图标反复丢失而做的 C# 重写
+
+本项目以 [MIT 协议](LICENSE) 开源。
