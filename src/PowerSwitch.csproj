@@ -1,0 +1,62 @@
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!--
+    这个 csproj 主要给 Visual Studio / Rider 打开用。
+    命令行构建请走 build\build.ps1（它直接调用 Framework 自带编译器，
+    不依赖 Roslyn 组件 —— 精简安装的 VS 往往缺 Roslyn，MSBuild 会报 MSB4019）。
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFrameworkVersion>v4.0</TargetFrameworkVersion>
+    <AssemblyName>PowerSwitch</AssemblyName>
+    <RootNamespace>PowerSwitch</RootNamespace>
+    <OutputPath>..\build\out\</OutputPath>
+    <DebugType>none</DebugType>
+    <Optimize>true</Optimize>
+    <ApplicationIcon>icons\icon-balanced.ico</ApplicationIcon>
+    <LangVersion>5</LangVersion>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="!Exists('$(TargetFrameworkDirectory)')">
+    <FrameworkPathOverride>C:\Windows\Microsoft.NET\Framework64\v4.0.30319</FrameworkPathOverride>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="AssemblyInfo.cs" />
+    <Compile Include="AppConfig.cs" />
+    <Compile Include="Logger.cs" />
+    <Compile Include="Paths.cs" />
+    <Compile Include="PowerEngine.cs" />
+    <Compile Include="PowerNative.cs" />
+    <Compile Include="PowerScheme.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="SettingsForm.cs" />
+    <Compile Include="TrayApp.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="icons\icon-saver.ico">
+      <LogicalName>PowerSwitch.icons.icon-saver.ico</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="icons\icon-balanced.ico">
+      <LogicalName>PowerSwitch.icons.icon-balanced.ico</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="icons\icon-high.ico">
+      <LogicalName>PowerSwitch.icons.icon-high.ico</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="icons\icon-paused.ico">
+      <LogicalName>PowerSwitch.icons.icon-paused.ico</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="icons\icon-unknown.ico">
+      <LogicalName>PowerSwitch.icons.icon-unknown.ico</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>

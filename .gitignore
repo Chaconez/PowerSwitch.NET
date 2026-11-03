@@ -1,0 +1,25 @@
+# ---------- 构建产物 ----------
+build/out/
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# ---------- 运行时数据（不应进仓库） ----------
+power_config.json
+power_switch.log
+power_switch.log.*
+power_switch_state.json
+watchdog.log
+watchdog.log.*
+automation.paused
+tray.stopped
+tray.pid
+open_settings.request
+*.bak
+
+# ---------- 系统 ----------
+Thumbs.db
+desktop.ini
+.DS_Store
