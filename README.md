@@ -1,153 +1,115 @@
-# PowerSwitch .NET
+# PowerSwitch
 
-> **NAS 上的电源计划自动切换** —— 按 CPU 负载与夜间时段，在「节能 / 平衡 / 高性能」之间自动切换，有效降低 NAS 空载待机功耗。
->
-> 这是 [PowerSwitch](https://github.com/Chaconez/PowerSwitch)（PowerShell 版）的 **C# 重写版**，为彻底解决「托盘图标反复丢失」而做。
+> 按 CPU 负载和夜间时段，在「节能 / 平衡 / 高性能」之间自动切换电源计划。
+> 远程桌面连进来时立刻锁定平衡方案，断开后自动交还给负载逻辑 —— 专为 24 小时挂机的 NAS 设计，用来压掉空载待机功耗。
 
-C# / .NET Framework 4.8 · WinForms · 单进程 · 零安装依赖 · 远程桌面联动
+![设置窗口](docs/images/settings-window.png)
 
----
-
-## 为什么要重写
-
-旧 PowerShell 版功能是好的，但托盘图标会反复消失。排查下来不是偶发 bug，而是**架构决定的必然结果**：
-
-| 现象 | 证据 | 根因 |
-|---|---|---|
-| 图标没了，进程也没了 | `tray.log` 记录了 18 次 `tray started`，**0 次 `tray stopped`** | 进程被硬杀（`0xC000013A`），`finally` 没执行 |
-| 死了不会自己回来 | 启动项只在登录时跑一次；交互式计划任务被系统拒绝（`0x800710E0`） | **没有任何自愈机制** |
-| 会话断开后消失 | 托盘最后一条日志 `14:49:12`，2 分钟后 `TS id=40 session 3 disconnected` | 进程生命周期被 RDP 会话绑死 |
-| explorer 重启后图标不回来 | 脚本里没有 `TaskbarCreated` 处理 | NotifyIcon 注册在 explorer 的托盘窗口上，窗口重建后句柄失效 |
-
-三个问题叠加：**进程会死、死了不回、回来了也可能没图标**。PowerShell 脚本单靠补丁无法同时解决，所以换语言重写。
+C# · .NET Framework 4.8 · WinForms · 单进程 · 零安装依赖 · v1.1.2
 
 ---
 
-## 架构
+## 它解决什么问题
 
-```
-┌─────────────────────────────────────────────┐
-│  PowerSwitchWatchdog.exe   (SYSTEM, 会话 0)  │
-│  · 每 15 秒枚举用户会话                      │
-│  · 会话里没有 PowerSwitch.exe 就拉起来        │
-│  · WTSQueryUserToken + CreateProcessAsUser   │
-└──────────────────┬──────────────────────────┘
-                   │ 跨会话创建
-                   ▼
-┌─────────────────────────────────────────────┐
-│  PowerSwitch.exe   (用户会话, 单进程)         │
-│  ┌──────────┐  ┌──────────┐  ┌────────────┐ │
-│  │ 托盘图标  │  │ 引擎定时器│  │ 设置窗口    │ │
-│  └──────────┘  └────┬─────┘  └────────────┘ │
-│                     │ 每 60 秒                │
-│                     ▼                        │
-│         GetSystemTimes 采样 CPU               │
-│                     │                        │
-│                     ▼                        │
-│         PowerSetActiveScheme (直接 API)       │
-└─────────────────────────────────────────────┘
-```
+NAS 常年开机，绝大部分时间是空载。Windows 默认的「平衡」方案在空载时并不会把频率压到最低，而手动切到「节能」又会在跑转码、同步、备份的时候拖慢机器。
 
-**关键差异**：旧版是「计划任务每分钟起一个新 PowerShell 进程 + 另一个进程画图标」，新版是「一个常驻进程内部跑定时器」。没有父子进程、没有任务计划程序、没有脚本释放，那两类架构性故障从根上消失。
+PowerSwitch 做的就是这件事：**看 CPU 在干什么，替你把方案切过去**。
 
----
+- 空载持续一段时间 → 切「节能」，功耗降下来
+- 负载起来持续一小会儿 → 切「平衡」，任务不卡
+- 你用远程桌面连进来干活 → 立刻锁「平衡」，断开后恢复自动切换
 
-## 图标不再丢失的三层防护
-
-这是重写的核心目标，做了三道独立防线：
-
-**第一层 · 响应任务栏重建**
-程序启动时注册一个隐藏窗口，监听 explorer 广播的 `TaskbarCreated` 消息。explorer 崩溃重启后，任务栏上的图标会被清空，收到消息就立刻重新注册。
-
-**第二层 · 盯住 shell 进程 PID**
-`TaskbarCreated` 是广播消息，理论上够用；但若 explorer 以非标准方式重启，消息可能收不到。所以每 5 秒比对一次 explorer 主进程 PID，发现变化就主动重注册图标。
-
-**第三层 · SYSTEM 看门狗**
-进程真的被外部杀掉（`taskkill /IM`、会话重置、内存压力），watchdog 15 秒内把它拉回用户会话。
-
-实测：
-
-```
-08:15:30  强杀托盘 pid 24592
-08:15:30  watchdog: 会话 3 内没有 PowerSwitch.exe，尝试拉起
-08:15:30  已启动 ... pid=24424        ← 同一个 15 秒周期内恢复
-```
-
----
-
-## 远程桌面联动（v1.1）
-
-NAS 平时空载跑节能档没问题，但**远程连进来干活的时候被限频**就很难受。所以加了一条硬规则：
-
-```
-外部机器 RDP 连入  →  立即切换到「平衡」，冻结自动切换
-外部机器 RDP 断开  →  清除防抖计时，自动切换重新接管
-```
-
-判定依据不是"本机有没有 mstsc 进程"（那只说明往外连），而是直接问终端服务：枚举所有会话，**状态 = 活动 且 客户端协议 = RDP** 才算远程连接。这样本机物理登录、控制台会话都不会误触发。
-
-两条检测通道并行，互为兜底：
-
-| 通道 | 延迟 | 作用 |
-|---|---|---|
-| `WTSRegisterSessionNotification` | ~0.4 秒 | 系统在会话变化时主动推消息，负责"立即" |
-| 定时轮询（默认 3 秒） | ≤3 秒 | 进程启动前就已连上、消息丢失、跨会话通知不到时兜底 |
-
-优先级（`PowerEngine` 里就这三层，从上到下）：
-
-```
-① 远程桌面连接中  → 锁定 RemoteDesktopMode，什么都不做
-② 手动暂停标志    → 什么都不做
-③ 自动逻辑        → 白天固定 / 夜间按负载防抖
-```
-
-> 远程桌面**压过**手动暂停：远程操作时被降到节能档会让整台机器明显卡顿，这个约束比"保持手动选择"更强。暂停标志本身不会被清掉，断开后照旧生效。
-
-日志里能直接看到全过程：
-
-```
-15:55:06 远程桌面状态变化: 已连接 Administrator@zhangwenjiedeMa（会话 3）
-15:55:06 检测到远程桌面连接：... 立即切换到 平衡 并暂停自动切换
-15:58:09 远程桌面连接中 - 强制切换到 平衡          ← 有人手动改档也会被拉回
-15:58:30 远程桌面状态变化: 已断开
-15:58:31 远程桌面已断开，恢复自动切换
-```
-
-托盘提示会显示「· 远程桌面」，右键菜单顶部多一行只读状态「远程桌面已连接 · 自动切换已暂停」。
+省的是 CPU 侧功耗（几瓦量级，取决于 CPU 和主板供电），不会让机械硬盘停转，也不控制风扇。
 
 ---
 
 ## 特性
 
-- **单进程**：托盘、采样、切换、设置窗口都在一个 exe 里，内存约 39 MB（旧版 128 MB）
-- **远程桌面联动**：外部机器 RDP 连入立即锁定平衡方案并暂停自动切换，断开后自动恢复
-- **直接调 API**：`PowerSetActiveScheme` 一步到位，不再每次 spawn 一个 `powercfg.exe`
-- **防抖状态机**：低负载需持续 N 分钟才降档，高负载 N 分钟才升档，避免阈值附近反复横跳
-- **状态持久化**：防抖计时写入 `power_switch_state.json`，进程重启不丢进度
-- **配置热生效**：改完设置立刻生效，不用重启、不用重装
-- **暂停**：临时接管 30 分钟 / 1 小时 / 2 小时 / 4 小时 / 直到手动恢复
-- **日志轮转**：超过阈值自动归档为 `.1`，不会无限增长
-- **零安装依赖**：目标 .NET Framework 4.8，Windows 10/11 系统自带
-- **高 DPI 友好**：声明 DPI 感知并自行缩放，200% 缩放下文字清晰不虚
+| 特性 | 说明 |
+|---|---|
+| **单进程常驻** | 托盘、采样、切换、设置窗口都在一个 exe 里，常驻内存约 40–50 MB |
+| **直接调 API** | `PowerSetActiveScheme` 一步到位，不 spawn `powercfg.exe`，没有子进程被连带杀死的问题 |
+| **防抖状态机** | 低负载要持续 N 分钟才降档、高负载 N 分钟才升档，避免在阈值附近反复横跳 |
+| **远程桌面联动** | 检测到 RDP 会话活动就锁定方案并暂停自动切换，断开即恢复 |
+| **状态持久化** | 防抖计时写进 `power_switch_state.json`，进程重启不丢进度 |
+| **配置热生效** | 设置窗口点「保存并应用」立即生效，不用重启、不用重装计划任务 |
+| **暂停** | 30 分钟 / 1 小时 / 2 小时 / 4 小时 / 直到手动恢复 |
+| **图标自愈** | 响应 `TaskbarCreated` + 盯 shell 进程 PID，explorer 重启后图标自动回来 |
+| **进程自愈** | SYSTEM 看门狗每 15 秒检查，托盘被杀后自动拉回用户会话 |
+| **高 DPI 友好** | 声明 DPI 感知并按 `DeviceDpi` 自行缩放，200% 缩放下文字不发虚 |
+| **零安装依赖** | 目标 .NET Framework 4.8，Windows 10/11 自带；不写注册表、不装服务 |
 
 ---
 
-## 快速开始
+## 决策逻辑
 
-**要求**：Windows 10 / 11（.NET Framework 4.8 已内置），管理员权限。
+每次判断按下面的优先级来，命中就结束：
+
+```
+① 远程桌面连接中（PauseOnRemoteDesktop = true）
+   → 锁定 RemoteDesktopMode，不做任何自动切换
+② automation.paused 存在且未到期
+   → 保持现状，什么都不做
+③ 自动逻辑
+   useLoadLogic = AllDayMonitor || 当前处于夜间时段
+   ├─ false（白天且未开全天监控）→ 固定 DayMode
+   └─ true → 按 CPU 负载走防抖状态机
+        ├─ 低负载持续 LowLoadDuration 分钟 → NightLowLoadMode
+        └─ 高负载持续 HighLoadDuration 分钟 → NightHighLoadMode
+```
+
+几个实现细节：
+
+- **采样**：`GetSystemTimes` 取两次差值算总占用率，每次判断采 `SampleCount` 次、间隔 `SampleIntervalSec` 秒后取平均，避免瞬时尖峰误判
+- **节拍**：引擎每 60 秒跑一轮；设置窗口里的「立即检查一次」会立刻插一轮
+- **降档比升档慢**：默认低负载要持续 5 分钟才降，高负载 1 分钟就升 —— 宁可多耗一点，也别让任务卡在节能档
+- **优先级说明**：远程桌面**压过**手动暂停。远程操作时被降到节能档会让整台机器明显卡顿，这个约束比「保持手动选择」更强；暂停标志本身不会被清掉，断开后照旧生效
+
+---
+
+## 远程桌面联动
+
+判定依据不是「本机有没有 mstsc 进程」（那只说明你在往外连），而是直接问终端服务：枚举所有会话，**状态 = 活动 且 客户端协议 = RDP** 才算有外部连入。这样本机物理登录、控制台会话都不会误触发。
+
+两条检测通道并行，互为兜底：
+
+| 通道 | 延迟 | 作用 |
+|---|---|---|
+| `WTSRegisterSessionNotification` | ~0.4 秒 | 系统在会话变化时主动推消息，负责「立即」 |
+| 定时轮询（默认 3 秒） | ≤3 秒 | 进程启动前就已连上、消息丢失、跨会话通知不到时兜底 |
+
+日志里能看到完整过程：
+
+```
+15:55:06 远程桌面状态变化: 已连接 Administrator@zhangwenjiedeMa（会话 3）
+15:55:06 检测到远程桌面连接：... 立即切换到 平衡 并暂停自动切换
+15:58:09 远程桌面连接中 - 强制切换到 平衡        ← 期间被手动改档也会拉回来
+15:58:30 远程桌面状态变化: 已断开
+15:58:31 远程桌面已断开，恢复自动切换
+```
+
+断开后不会立刻降档，而是**清空计时重新计**：远程刚结束，机器往往还在收尾，立刻降到节能反而拖慢它。
+
+---
+
+## 安装
+
+**要求**：Windows 10 / 11（.NET Framework 4.8 内置），首次安装需要管理员权限。
 
 ```powershell
-# 1. 把 PowerSwitch.exe 和 PowerSwitchWatchdog.exe 放到同一目录
-#    推荐 C:\ProgramData\PowerSwitch\
+# 1. 两个 exe 放到同一目录，推荐 C:\ProgramData\PowerSwitch\
+#    PowerSwitch.exe          —— 托盘主程序
+#    PowerSwitchWatchdog.exe  —— SYSTEM 看门狗
 
 # 2. 注册看门狗（SYSTEM 身份，开机自启 + 每 5 分钟兜底）
-$exe = "C:\ProgramData\PowerSwitch\PowerSwitchWatchdog.exe"
 $dir = "C:\ProgramData\PowerSwitch"
+$exe = Join-Path $dir "PowerSwitchWatchdog.exe"
 $act = New-ScheduledTaskAction -Execute $exe -Argument "--dir `"$dir`"" -WorkingDirectory $dir
 $prn = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 $set = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-       -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
+       -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) `
+       -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName 'PowerSwitchWatchdog' -Action $act `
     -Trigger (New-ScheduledTaskTrigger -AtStartup) -Settings $set -Principal $prn -Force
 
@@ -155,71 +117,48 @@ Register-ScheduledTask -TaskName 'PowerSwitchWatchdog' -Action $act `
 Start-ScheduledTask -TaskName 'PowerSwitchWatchdog'
 ```
 
-启动后托盘出现，右键即可设置。也可以直接双击 `PowerSwitch.exe`。
+启动后托盘出现图标，双击即可打开设置。也可以直接双击 `PowerSwitch.exe`。
 
-**登录自启（可选，只是加速）**：在启动文件夹放一个 `PowerSwitch.vbs`：
+**登录自启（可选，只是让图标出现得更快）**：设置窗口里勾「开机自动启动」即可，它会在启动文件夹写一个 `PowerSwitch.vbs`，勾掉就删掉，不碰注册表。没有它也能用 —— 看门狗 15 秒内会把托盘拉起来。
 
-```vbs
-CreateObject("WScript.Shell").Run """C:\ProgramData\PowerSwitch\PowerSwitch.exe""", 0, False
-```
-
-> 没有它也能用 —— 看门狗每 15 秒检查一次，登录后最多 15 秒图标就会出现。程序内有全局互斥量，两条路同时启动也只会有一个实例。
+程序用全局互斥量 `Global\PowerSwitchTray` 保证只有一个实例，两条路同时启动也只会有一个图标。
 
 ---
 
 ## 设置窗口
 
-![设置窗口](docs/images/settings-window.png)
+顶部是**实时状态**：当前方案、CPU、内存、自动切换是否在跑、判定结果、还要多久降档。下面按「切换条件 / 模式映射 / 远程桌面 / 高级」分成四组。
 
-顶部是**实时状态**：当前方案、CPU、内存、自动切换是否在跑、判定结果、还要多久降档。下面按「切换条件 / 模式映射 / 远程桌面 / 高级」分成四组，改完点「保存并应用」即时生效，不用重启，也不用重装计划任务。
-
-几个容易忽略的细节：
-
-- 状态条每 2 秒刷新一次，所以能直接看到「低负载 3.5/5 分 → 节能」这种进度，而不是只能翻日志
-- 「节能 / 平衡 / 高性能」三个按钮是手动接管，立刻生效；但远程桌面锁定期间会被拉回锁定方案
-- 「开机自动启动」写的是 `启动` 文件夹里的一个 `PowerSwitch.vbs`，勾掉就删掉，不碰注册表
-- 窗口在 `app.manifest` 里声明了 DPI 感知，200% 缩放下按 `DeviceDpi` 自行缩放，文字不会像旧版那样被位图放大后发虚
+- 状态条每 2 秒刷新，能直接看到「低负载 3.5/5 分 → 节能」这种进度，不用翻日志
+- 「节能 / 平衡 / 高性能」是手动接管，点了立刻生效；但远程桌面锁定期间会被拉回锁定方案
+- 「暂停自动切换」勾上后托盘图标变空心，自动逻辑停摆，手动切换仍然有效
 
 ---
 
 ## 配置
 
-配置文件 `power_config.json` 与旧 PowerShell 版**格式完全兼容**，迁移时直接沿用即可。
+配置文件 `power_config.json` 放在 exe 同目录，格式与旧 PowerShell 版完全兼容。
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `NightStartHour` | `23` | 夜间开始（24 小时制） |
-| `NightEndHour` | `7` | 夜间结束 |
+| `NightStartHour` | `23` | 夜间开始（24 小时制，0–23） |
+| `NightEndHour` | `7` | 夜间结束；跨零点（如 23 → 7）也支持 |
 | `AllDayMonitor` | `true` | `true` = 忽略夜间时段，全天按负载切换 |
 | `CpuThreshold` | `20` | CPU 阈值（%），低于此值算低负载 |
 | `LowLoadDuration` | `5` | 低负载持续多少分钟才降档 |
 | `HighLoadDuration` | `1` | 高负载持续多少分钟才升档 |
-| `SampleCount` | `2` | 每次检测的采样次数 |
+| `SampleCount` | `2` | 每次判断采几次样 |
 | `SampleIntervalSec` | `5` | 采样间隔（秒） |
-| `MaxLogSizeMB` | `5` | 日志超过该大小即轮转 |
-| `TrayRefreshSec` | `15` | 托盘图标刷新间隔（秒） |
+| `MaxLogSizeMB` | `5` | 日志超过该大小即轮转为 `.1` |
+| `TrayRefreshSec` | `15` | 托盘图标与提示的刷新间隔（秒） |
 | `DayMode` | `Balanced` | 白天固定方案（仅 `AllDayMonitor=false` 时生效） |
 | `NightLowLoadMode` | `PowerSaver` | 低负载目标方案 |
 | `NightHighLoadMode` | `Balanced` | 高负载目标方案 |
 | `PauseOnRemoteDesktop` | `true` | 远程桌面连接时锁定方案并暂停自动切换 |
 | `RemoteDesktopMode` | `Balanced` | 远程桌面期间锁定到哪个方案 |
-| `RdpPollSeconds` | `3` | 远程桌面状态轮询间隔（秒），1–60 |
+| `RdpPollSeconds` | `3` | 远程桌面状态轮询间隔（秒，1–60） |
 
-**决策逻辑**：
-
-```
-① 远程桌面连接中（PauseOnRemoteDesktop=true）→ 锁定 RemoteDesktopMode，结束
-② automation.paused 存在且未到期              → 保持现状，结束
-③ 自动逻辑：
-   useLoadLogic = AllDayMonitor || 当前处于夜间时段
-
-   ├─ false（白天且未开全天监控）→ 固定 DayMode
-   └─ true → 按 CPU 负载走防抖状态机
-        ├─ 低负载持续 LowLoadDuration 分钟 → NightLowLoadMode
-        └─ 高负载持续 HighLoadDuration 分钟 → NightHighLoadMode
-```
-
-**电源方案 GUID**（系统固定值）：
+**电源方案 GUID**（系统固定值，不随语言变化）：
 
 | 键名 | GUID |
 |---|---|
@@ -232,27 +171,30 @@ CreateObject("WScript.Shell").Run """C:\ProgramData\PowerSwitch\PowerSwitch.exe"
 
 ## 命令行
 
-| 参数 | 说明 |
-|---|---|
-| 无参数 | 启动托盘（已有实例时静默退出） |
-| `--settings` | 启动并直接弹出设置窗口 |
+| 参数 | 程序 | 说明 |
+|---|---|---|
+| 无参数 | PowerSwitch | 启动托盘（已有实例时静默退出） |
+| `--settings` | PowerSwitch | 启动并直接弹出设置窗口 |
+| `--once` | Watchdog | 只检查一次就退出（调试用） |
+| `--dir <路径>` | Watchdog | 指定主程序所在目录，默认与看门狗同目录 |
 
-**轻量控制通道**：在运行目录放一个 `open_settings.request` 文件，运行中的实例会在 5 秒内打开设置窗口并删除该文件。适合脚本、快捷方式或远程操作。
+**轻量控制通道**：在运行目录放一个 `open_settings.request` 文件，运行中的实例会在一个刷新周期内打开设置窗口并删掉该文件。适合脚本、快捷方式或远程操作 —— 不必去找托盘图标。
 
 ---
 
-## 与 PowerShell 版对比
+## 运行时文件
 
-| 维度 | PowerShell 版 | 本版 |
-|---|---|---|
-| 进程模型 | 计划任务每分钟起新进程 + 独立托盘进程 | **单进程常驻** |
-| 每天进程创建 | 1440 次 | **0 次** |
-| 常驻内存 | 128 MB | **39 MB**（实测） |
-| 切换方式 | `powercfg /setactive`（spawn 子进程） | **`PowerSetActiveScheme` 直接 API** |
-| 计划任务 | 2 个（SYSTEM + 交互式用户，后者常被拒） | **1 个（仅 watchdog，SYSTEM）** |
-| 图标恢复 | 无 | **TaskbarCreated + PID 监控** |
-| 进程自愈 | 无 | **watchdog 15 秒内拉起** |
-| 代码可测试性 | 脚本，难以单测 | 可单元测试 |
+都在 exe 同目录，已被 `.gitignore` 排除：
+
+| 文件 | 作用 |
+|---|---|
+| `power_config.json` | 配置 |
+| `power_switch.log` / `.log.1` | 主日志，超过 `MaxLogSizeMB` 自动轮转 |
+| `power_switch_state.json` | 防抖计时与当前方案，重启不丢进度 |
+| `automation.paused` | 暂停标志，存在即暂停；内容含到期时间 |
+| `watchdog.log` | 看门狗日志 |
+| `tray.stopped` | 用户主动退出的标记，30 分钟内不再拉起 |
+| `open_settings.request` | 控制请求（临时文件） |
 
 ---
 
@@ -265,14 +207,13 @@ powershell -ExecutionPolicy Bypass -File build\build.ps1
 ```
 
 产物在 `build\out\`：
-- `PowerSwitch.exe`（约 845 KB）
+
+- `PowerSwitch.exe`（约 866 KB）
 - `PowerSwitchWatchdog.exe`（约 11 KB）
 
-构建脚本直接调用 `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe`，绕开 MSBuild 对 Roslyn 的依赖 —— 精简安装的 VS 常常缺 Roslyn 组件，用 MSBuild 会报 `MSB4019`。
+构建脚本直接调用 `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe`，绕开 MSBuild 对 Roslyn 的依赖 —— 精简安装的 VS 常常缺 Roslyn 组件，用 MSBuild 会报 `MSB4019`。`src\app.manifest` 通过 `/win32manifest` 嵌入，负责声明 DPI 感知和视觉样式。
 
-**语言版本**：C# 5（Framework 自带编译器只支持到 5.0）。所以代码里没有字符串插值、`?.`、表达式体成员。想用新语法可以装 .NET SDK 后改用 `dotnet build`。
-
-`src\PowerSwitch.csproj` 供 IDE 打开使用。
+**语言版本**：C# 5（Framework 自带编译器只支持到 5.0）。所以代码里没有字符串插值、`?.`、表达式体成员。想用新语法可以装 .NET SDK 后改用 `dotnet build`，`src\PowerSwitch.csproj` 已备好。
 
 ---
 
@@ -280,14 +221,12 @@ powershell -ExecutionPolicy Bypass -File build\build.ps1
 
 **托盘图标不见了**
 
-先看进程还在不在：
-
 ```powershell
 Get-Process PowerSwitch | Select-Object Id, SessionId, @{n='MB';e={[int]($_.WorkingSet64/1MB)}}
 ```
 
-- **进程在，图标没了** → explorer 重启过。本版会自动恢复；若没恢复，看日志里有没有 `重新注册托盘图标`。
-- **进程也没了** → 看 `watchdog.log`，正常应该 15 秒内出现 `已启动 ... pid=`。若没有，检查计划任务状态：
+- **进程在、图标没了** → explorer 重启过。本版会自动恢复；若没恢复，看日志里有没有 `重新注册托盘图标`
+- **进程也没了** → 看 `watchdog.log`，正常应该 15 秒内出现 `已启动 ... pid=`。若没有，检查任务状态：
 
 ```powershell
 Get-ScheduledTaskInfo -TaskName PowerSwitchWatchdog | Select-Object LastRunTime, LastTaskResult
@@ -295,23 +234,30 @@ Get-ScheduledTaskInfo -TaskName PowerSwitchWatchdog | Select-Object LastRunTime,
 
 `LastTaskResult = 267009`（`0x41301`）表示任务正在运行，正常。
 
+**设置了「退出」但图标又回来了**
+
+`tray.stopped` 标记只挡 30 分钟，且重新手动启动会清掉它。要长期停用，请禁用计划任务：
+
+```powershell
+Disable-ScheduledTask -TaskName PowerSwitchWatchdog
+```
+
 **设置窗口打不开**
 
 ```powershell
-# 直接触发
 Set-Content C:\ProgramData\PowerSwitch\open_settings.request -Value go
 ```
 
 **看门狗拉不起进程**
 
-`watchdog.log` 里若出现 `WTSQueryUserToken 失败` 或 `CreateProcessAsUser 失败 (1314)`，说明 SYSTEM 缺少 `SeTcbPrivilege` 或目标会话没有登录用户。用 `quser` 确认会话状态。
+`watchdog.log` 里若出现 `WTSQueryUserToken 失败` 或 `CreateProcessAsUser 失败 (1314)`，说明 SYSTEM 缺少 `SeTcbPrivilege`，或目标会话没有登录用户。用 `quser` 确认会话状态。
 
 **日志乱码**
 
 PowerShell 5.1 的 `Get-Content` 默认按 ANSI 解码，而日志是 UTF-8：
 
 ```powershell
-Get-Content C:\ProgramData\PowerSwitch\power_switch.log -Tail 20 -Encoding UTF8
+Get-Content C:\ProgramData\PowerSwitch\power_switch.log -Tail 30 -Encoding UTF8
 ```
 
 ---
@@ -321,18 +267,19 @@ Get-Content C:\ProgramData\PowerSwitch\power_switch.log -Tail 20 -Encoding UTF8
 ```
 PowerSwitch/
 ├── src/                          # 主程序
-│   ├── Program.cs                # 入口：单实例、全局异常兜底
+│   ├── Program.cs                # 入口：单实例互斥量、全局异常兜底
 │   ├── TrayApp.cs                # 托盘、菜单、TaskbarCreated 恢复
 │   ├── PowerEngine.cs            # 采样 + 防抖状态机 + 远程桌面覆盖
 │   ├── PowerNative.cs            # P/Invoke：电源 API、CPU 采样
-│   ├── RdpMonitor.cs             # 远程桌面会话检测（WTS API + 会话变更通知）
 │   ├── PowerScheme.cs            # 方案 GUID 与名称映射
+│   ├── RdpMonitor.cs             # 远程桌面会话检测（WTS API + 会话变更通知）
+│   ├── AppIcon.cs                # 图标统一入口（托盘与窗口共用）
 │   ├── AppConfig.cs              # 配置模型 + 扁平 JSON 读写
-│   ├── SettingsForm.cs           # 设置窗口（分组卡片 + 实时状态条，按 DPI 自行缩放）
+│   ├── SettingsForm.cs           # 设置窗口（分组卡片 + 实时状态条）
 │   ├── Logger.cs                 # 日志与轮转
 │   ├── Paths.cs                  # 路径常量
-│   ├── AssemblyInfo.cs
 │   ├── app.manifest              # DPI 感知 + 视觉样式
+│   ├── AssemblyInfo.cs
 │   ├── PowerSwitch.csproj
 │   └── icons/                    # 5 个托盘图标（嵌入资源）
 ├── watchdog/
@@ -342,59 +289,32 @@ PowerSwitch/
 └── docs/images/
 ```
 
-**运行时文件**（在 exe 同目录，已被 `.gitignore` 排除）：
-
-```
-power_config.json          配置
-power_config.default.json  默认配置
-power_switch.log           主日志
-power_switch_state.json    防抖状态
-watchdog.log               看门狗日志
-automation.paused          暂停标志（存在即暂停）
-tray.stopped               用户主动退出标志（30 分钟内不拉起）
-open_settings.request      控制请求（临时）
-```
-
 ---
 
 ## 卸载
 
 ```powershell
-# 1. 停任务
 Stop-ScheduledTask -TaskName PowerSwitchWatchdog
 Unregister-ScheduledTask -TaskName PowerSwitchWatchdog -Confirm:$false
-
-# 2. 停进程
 Get-Process PowerSwitch* | Stop-Process -Force
-
-# 3. 删自启（如果有）
-Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\PowerSwitch.vbs"
-
-# 4. 删目录
+Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\PowerSwitch.vbs" -ErrorAction SilentlyContinue
 Remove-Item C:\ProgramData\PowerSwitch -Recurse -Force
 ```
 
-程序不写注册表、不装服务、不注入系统目录，删干净即恢复原状。
+不写注册表、不装服务、不注入系统目录，删干净即恢复原状。
 
 ---
 
-## 兼容性
+## 已知限制
 
-| 系统 | 状态 |
-|---|---|
-| Windows 11 | ✅ 已在 Windows 11 24H2 上验证 |
-| Windows 10 | ✅ .NET Framework 4.8 内置 |
-| Windows Server 2019/2022 | ✅ 理论可用（未实测） |
-| Windows 7 / 8.1 | ⚠️ 需要 .NET Framework 4.8 补丁 |
-
-**已知限制**：
-
-- 切换的是**整个电源方案**，会连带应用该方案下的「硬盘关闭时间」。若各方案在这一项配置不同，硬盘休眠行为会跟着变 —— 长期挂机建议先把各方案的硬盘超时统一。
-- 省的是 **CPU 侧功耗**，量级取决于 CPU 型号与主板供电，通常几瓦；它不会让机械硬盘停转，也不控制风扇曲线。
-- 看门狗需要 SYSTEM 权限注册计划任务，首次安装需要管理员。
+- 切换的是**整个电源方案**，会连带应用该方案下的「硬盘关闭时间」。若各方案这一项配置不同，硬盘休眠行为会跟着变 —— 长期挂机建议先把各方案的硬盘超时统一
+- 省的是 **CPU 侧功耗**，量级几瓦；不会让机械硬盘停转，也不控制风扇曲线
+- 看门狗需要 SYSTEM 权限注册计划任务，首次安装需要管理员
+- 远程桌面检测基于「会话协议类型」，Hyper-V 增强会话模式也会被识别为 RDP（通常正是想要的行为）
+- 兼容性：Windows 11 ✅ 已实测（24H2）、Windows 10 ✅、Server 2019/2022 ✅ 理论可用、Windows 7/8.1 ⚠️ 需装 .NET Framework 4.8
 
 ---
 
 ## 相关
 
-- [PowerSwitch](https://github.com/Chaconez/PowerSwitch) —— 原 PowerShell 实现（功能等价，含更详细的省电原理说明）
+- [PowerSwitch（PowerShell 版）](https://github.com/Chaconez/PowerSwitch) —— 初版实现，功能等价，本仓库是为解决其托盘图标反复丢失而做的 C# 重写

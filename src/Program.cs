@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Reflection;
 using System.Threading;
 using System.Windows.Forms;
@@ -37,6 +38,16 @@ namespace PowerSwitch
 
             AppConfig cfg = ConfigStore.Load(Paths.ConfigFile);
             Logger.Init(Paths.LogFile, cfg.MaxLogSizeMB);
+
+            // 启动即清掉「用户主动退出」标记：否则上次点过退出，这次手动启动会被看门狗忽略
+            try
+            {
+                string stopped = Path.Combine(Paths.DataDir, "tray.stopped");
+                if (File.Exists(stopped)) { File.Delete(stopped); }
+            }
+            catch
+            {
+            }
 
             // 单进程架构的核心保障：任何未捕获异常都只记日志，不杀进程。
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);

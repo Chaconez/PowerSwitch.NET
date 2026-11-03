@@ -155,7 +155,8 @@ namespace PowerSwitch
         {
             SuspendLayout();
 
-            Text = "电源模式设置";
+            Text = "PowerSwitch";
+            Icon = AppIcon.ForEngine(_engine);   // 与托盘图标保持同一份
             ClientSize = new Size(P(560), P(846));
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedSingle;

@@ -73,7 +73,7 @@ namespace PowerSwitch
 
             // UI 侧轻量刷新：图标与提示文字
             _uiTimer = new System.Windows.Forms.Timer();
-            _uiTimer.Interval = 5000;
+            _uiTimer.Interval = Math.Max(1, _engine.Config.TrayRefreshSec) * 1000;
             _uiTimer.Tick += delegate { SafeUi(RefreshUi); };
             _uiTimer.Start();
 
@@ -245,12 +245,26 @@ namespace PowerSwitch
             UpdateTooltip();
             CheckShellRestart();
             CheckControlRequest();
-            SyncRdpPoll();
+            SyncTimers();
         }
 
-        /// <summary>设置里改了检测间隔就跟着调整，不用重启进程。</summary>
-        private void SyncRdpPoll()
+        /// <summary>设置里改了刷新间隔/检测间隔就跟着调整，不用重启进程。</summary>
+        private void SyncTimers()
         {
+            try
+            {
+                int uiMs = Math.Max(1, _engine.Config.TrayRefreshSec) * 1000;
+                if (_uiTimer.Interval != uiMs)
+                {
+                    _uiTimer.Interval = uiMs;
+                    Logger.Info("托盘刷新间隔改为 " + (uiMs / 1000) + " 秒");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("同步托盘刷新间隔失败: " + Logger.Describe(ex));
+            }
+
             try
             {
                 int want = _engine.Config.RdpPollSeconds;
@@ -305,18 +319,9 @@ namespace PowerSwitch
 
         private void ApplyIcon()
         {
-            Icon target;
-            if (_engine.IsPaused && !_engine.IsRemoteOverrideActive) { target = LoadIcon("paused"); }
-            else
-            {
-                string key = _engine.CurrentKey;
-                if (key == PowerScheme.Saver) { target = LoadIcon("saver"); }
-                else if (key == PowerScheme.HighPerformance || key == PowerScheme.UltimatePerformance) { target = LoadIcon("high"); }
-                else if (key == PowerScheme.Balanced) { target = LoadIcon("balanced"); }
-                else { target = LoadIcon("unknown"); }
-            }
-
-            if (_currentIcon == null || !ReferenceEquals(_currentIcon, target))
+            // 图标选择逻辑收在 AppIcon 里，设置窗口用的是同一份，保证两边永远一致
+            Icon target = AppIcon.ForEngine(_engine);
+            if (!ReferenceEquals(_currentIcon, target))
             {
                 _icon.Icon = target;
                 _currentIcon = target;
@@ -472,7 +477,7 @@ namespace PowerSwitch
                 catch { }
                 string text =
                     "PowerSwitch " + version + Environment.NewLine +
-                    "电源计划自动切换（C# 版）" + Environment.NewLine + Environment.NewLine +
+                    "电源计划自动切换" + Environment.NewLine + Environment.NewLine +
                     "按 CPU 负载与夜间时段，自动在节能 / 平衡 / 高性能之间切换，" +
                     "降低 NAS 空载待机功耗。" + Environment.NewLine +
                     "检测到远程桌面连接时锁定方案并暂停自动切换，断开后自动恢复。" + Environment.NewLine + Environment.NewLine +
@@ -504,6 +509,17 @@ namespace PowerSwitch
             try
             {
                 Logger.Info("用户从托盘退出");
+                // 留个标记：看门狗看到它就不会立刻把进程拉回来（宽限期 30 分钟）。
+                // 没有这个文件的话，「退出」15 秒后图标就又出现了。
+                try
+                {
+                    File.WriteAllText(Path.Combine(Paths.DataDir, "tray.stopped"),
+                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn("写入退出标记失败: " + Logger.Describe(ex));
+                }
                 _tickTimer.Change(Timeout.Infinite, Timeout.Infinite);
                 _uiTimer.Stop();
                 _icon.Visible = false;
@@ -513,23 +529,6 @@ namespace PowerSwitch
             {
             }
             ExitThread();
-        }
-
-        private static Icon LoadIcon(string name)
-        {
-            try
-            {
-                Assembly asm = Assembly.GetExecutingAssembly();
-                string res = "PowerSwitch.icons.icon-" + name + ".ico";
-                using (Stream s = asm.GetManifestResourceStream(res))
-                {
-                    if (s != null) { return new Icon(s); }
-                }
-            }
-            catch
-            {
-            }
-            return SystemIcons.Application;
         }
 
         /// <summary>把动作丢回 UI 线程执行，并且保证异常不外溢。</summary>
