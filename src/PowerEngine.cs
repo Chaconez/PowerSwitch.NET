@@ -24,6 +24,8 @@ namespace PowerSwitch
         private readonly string _configPath;
         private readonly string _statePath;
         private readonly string _pausePath;
+        private readonly string _switchPath;
+        private long _lastReqTicks;
         private readonly object _sync = new object();
 
         private AppConfig _cfg;
@@ -42,12 +44,23 @@ namespace PowerSwitch
         private string _rdpClient;
         private DateTime? _rdpSince;
 
+        /// <summary>
+        /// 本实例是否是全机电源方案的驱动者，由 TrayApp 按 EngineLeader 的选举结果设置。
+        ///
+        /// false 时引擎照常采样、照常算出该切到哪个方案，但**不修改系统状态**，
+        /// 也不写状态文件 —— 否则多个会话的实例会互相覆盖防抖计时。
+        /// 默认 true：单独跑引擎（测试脚手架）时不依赖选举。
+        /// </summary>
+        public bool IsDriver { get; set; }
+
         public PowerEngine(string baseDir)
         {
             _configPath = Path.Combine(baseDir, "power_config.json");
             _statePath = Path.Combine(baseDir, "power_switch_state.json");
             _pausePath = Path.Combine(baseDir, "automation.paused");
+            _switchPath = Path.Combine(baseDir, "switch.request");
             _cfg = ConfigStore.Load(_configPath);
+            IsDriver = true;    // TrayApp 会在选举后覆盖；单独跑引擎时保持可驱动
             LoadState();
         }
 
@@ -274,6 +287,22 @@ namespace PowerSwitch
             string key = PowerScheme.NormalizeName(schemeKey, null);
             if (key == null) { return false; }
 
+            if (!IsDriver)
+            {
+                // 只读实例不能直接改系统方案（否则多会话会互相覆盖），
+                // 但可以把意图写进控制文件，由驱动者代跑 —— 否则用户点按钮像坏了一样。
+                bool sent = WriteSwitchRequest(key);
+                int sid = EngineLeader.LeaderSession;
+                SetAction(sent
+                    ? (sid > 0
+                        ? "已请求会话 " + sid + " 切换 → " + PowerScheme.DisplayName(key)
+                        : "已请求其他会话切换 → " + PowerScheme.DisplayName(key))
+                    : "只读 - 无法提交切换请求");
+                Logger.Info("只读实例提交切换请求: " + PowerScheme.DisplayName(key) + "，sent=" + sent);
+                RaiseChanged();
+                return sent;
+            }
+
             bool ok = PowerNative.SetActiveScheme(PowerScheme.ToGuid(key));
             if (ok)
             {
@@ -289,7 +318,70 @@ namespace PowerSwitch
                 Logger.Info("手动切换电源方案 -> " + PowerScheme.DisplayName(key));
                 RaiseChanged();
             }
+            else if (PowerNative.LastSchemeError == 5)
+            {
+                EngineLeader.ReportCannotDrive("手动切换被拒绝，0x5");
+            }
             return ok;
+        }
+
+        /// <summary>
+        /// 只读实例把切换意图写进 switch.request，格式 `方案键|UTC ticks`。
+        /// 不用「写文件后删除」的方式：跨用户删除对方创建的文件会被 ACL 拒绝。
+        /// </summary>
+        private bool WriteSwitchRequest(string key)
+        {
+            try
+            {
+                File.WriteAllText(_switchPath,
+                    key + "|" + DateTime.Now.Ticks.ToString(),
+                    new UTF8Encoding(false));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("写入切换请求失败: " + Logger.Describe(ex));
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 驱动者调用：消费其他会话提交的切换请求。
+        /// 由 2 秒的轻量定时器驱动，这样多会话下点「节能/平衡」也能很快生效，
+        /// 不必等 60 秒的引擎周期。只认 60 秒内的请求，避免执行陈旧文件。
+        /// </summary>
+        public void PumpRequests()
+        {
+            if (!IsDriver) { return; }
+            try
+            {
+                if (!File.Exists(_switchPath)) { return; }
+                string text = File.ReadAllText(_switchPath).Trim();
+                if (text.Length == 0) { return; }
+
+                string[] parts = text.Split('|');
+                if (parts.Length < 2) { return; }
+
+                long ticks;
+                if (!long.TryParse(parts[1], out ticks)) { return; }
+                if (ticks <= _lastReqTicks) { return; }
+                _lastReqTicks = ticks;
+
+                DateTime when;
+                try { when = new DateTime(ticks, DateTimeKind.Local); }
+                catch { return; }
+                if ((DateTime.Now - when).TotalSeconds > 60) { return; }
+
+                string key = PowerScheme.NormalizeName(parts[0], null);
+                if (key == null) { return; }
+
+                Logger.Info("执行其他会话提交的切换请求: " + PowerScheme.DisplayName(key));
+                ForceSwitch(key);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("处理切换请求失败: " + Logger.Describe(ex));
+            }
         }
 
         private void SetAction(string text)
@@ -494,6 +586,18 @@ namespace PowerSwitch
 
         private void ApplyScheme(string key, string reason)
         {
+            if (!IsDriver)
+            {
+                // 只读实例：读回系统真实方案用于显示，但绝不修改它。
+                // 多会话时由 EngineLeader 选出的那个实例负责真正的切换。
+                RefreshCurrent();
+                int sid = EngineLeader.LeaderSession;
+                SetAction(sid > 0
+                    ? "只读 - 方案由会话 " + sid + " 驱动"
+                    : "只读 - 方案由其他会话驱动");
+                return;
+            }
+
             bool ok = PowerNative.SetActiveScheme(PowerScheme.ToGuid(key));
             if (ok)
             {
@@ -503,6 +607,12 @@ namespace PowerSwitch
             else
             {
                 SetAction("切换失败，详见日志");
+                // 0x5 = ERROR_ACCESS_DENIED：本会话的账户没有改电源方案的权限。
+                // 这种情况让位给别的会话，别死抱着驱动权什么都不做。
+                if (PowerNative.LastSchemeError == 5)
+                {
+                    EngineLeader.ReportCannotDrive("PowerSetActiveScheme 被拒绝，0x5");
+                }
             }
         }
 
@@ -579,6 +689,10 @@ namespace PowerSwitch
 
         private void SaveState()
         {
+            // 只读实例不写状态文件：防抖计时归驱动者所有，
+            // 多写一份会让驱动者下次启动时读到别人的进度。
+            if (!IsDriver) { return; }
+
             try
             {
                 StringBuilder sb = new StringBuilder();

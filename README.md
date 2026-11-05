@@ -5,7 +5,7 @@
 
 ![设置窗口](docs/images/settings-window.png)
 
-C# · .NET 8 · WinForms · 单进程 · 单文件发布 · v1.2.0
+C# · .NET 8 · WinForms · 单进程 · 单文件发布 · v1.2.1
 
 ---
 
@@ -138,7 +138,35 @@ Start-ScheduledTask -TaskName 'PowerSwitchWatchdog'
 
 **登录自启（可选，只是让图标出现得更快）**：设置窗口里勾「开机自动启动」即可，它会在启动文件夹写一个 `PowerSwitch.vbs`，勾掉就删掉，不碰注册表。没有它也能用 —— 看门狗 15 秒内会把托盘拉起来。
 
-程序用全局互斥量 `Global\PowerSwitchTray` 保证只有一个实例，两条路同时启动也只会有一个图标。
+程序用**会话级**互斥量 `PowerSwitchTray` 保证同一个登录会话里只有一个实例，两条路同时启动也只会有一个图标。
+
+> 这里曾经是 `Global\PowerSwitchTray`（全机唯一），但看门狗是「每个会话各拉一个实例」，
+> 两者矛盾：第二个用户登录时打不开别人创建的全局对象（`UnauthorizedAccessException`），
+> 而当时的异常分支选择了「继续启动」，结果同一个托盘里出现两个图标。详见下面的多会话一节。
+
+---
+
+## 多会话与多用户
+
+同一台机器上可能同时存在多个登录会话（控制台一个、RDP 一个），看门狗会给**每个会话各拉一个实例**，这样谁登录都能看到托盘图标。
+
+但电源方案是**全机唯一**的系统状态，多个实例同时驱动会互相覆盖（防抖计时在各自内存里，阈值附近可能一个要降档、一个要保档，来回横跳）。所以实例之间要选出一个「驱动者」：
+
+| 角色 | 行为 |
+|---|---|
+| **驱动者** | 正常采样、正常切换方案、写状态文件 |
+| **只读实例** | 照常采样与显示状态，但不改方案、不写状态文件；状态条显示「自动切换：只读 / 驱动：会话 N」 |
+
+选举规则按优先级：
+
+1. **能写数据目录的实例优先**。写不了日志的账户通常也改不了电源方案 —— 实测标准用户账户调 `PowerSetActiveScheme` 会拿到 `0x5 ACCESS_DENIED`，让它当驱动者等于让整个工具失效。这类实例会主动弃选，给能写的实例 15 秒先手时间。
+2. 15 秒后仍无人驱动 → 弃选的实例兜底上位（避免无人驱动）。
+3. 驱动者如果**实测**发现自己切换失败（返回 `0x5`），会立刻让位并永久退出本进程的选举，避免两个实例反复抢。
+4. 驱动者退出（注销 / 被杀）后，其余实例 2 秒内接手，不用重启托盘。
+
+**只读实例也能操作方案**：点「节能 / 平衡 / 高性能」时，它把意图写进 `switch.request`（格式 `方案键|ticks`），驱动者 2 秒内代为执行。所以从任何会话点按钮都能生效，只是实际执行的是驱动者。
+
+**日志会按会话拆分**：多用户共用 `C:\ProgramData\PowerSwitch` 时，日志文件的属主是先创建它的那个账户，其他账户只有读权限。主日志写不进去时，实例会自动降级到 `power_switch.session<N>.log`，并在文件头留一行说明 —— 否则非属主会话的实例会彻底哑掉，出问题无从排查。
 
 ---
 
@@ -207,8 +235,11 @@ Start-ScheduledTask -TaskName 'PowerSwitchWatchdog'
 |---|---|
 | `power_config.json` | 配置 |
 | `power_switch.log` / `.log.1` | 主日志，超过 `MaxLogSizeMB` 自动轮转 |
-| `power_switch_state.json` | 防抖计时与当前方案，重启不丢进度 |
+| `power_switch.session<N>.log` | 主日志不可写时的降级日志（多用户场景） |
+| `power_switch_state.json` | 防抖计时与当前方案，重启不丢进度（仅驱动者写） |
 | `automation.paused` | 暂停标志，存在即暂停；内容含到期时间 |
+| `engine.leader` | 当前驱动者的 `pid\|会话\|时间`，供只读实例显示 |
+| `switch.request` | 只读实例提交的切换请求，驱动者 2 秒内消费 |
 | `watchdog.log` | 看门狗日志 |
 | `tray.stopped` | 用户主动退出的标记，30 分钟内不再拉起 |
 | `open_settings.request` | 控制请求（临时文件） |
@@ -262,6 +293,21 @@ Get-ScheduledTaskInfo -TaskName PowerSwitchWatchdog | Select-Object LastRunTime,
 
 `LastTaskResult = 267009`（`0x41301`）表示任务正在运行，正常。
 
+**托盘里出现多个图标**
+
+同一个托盘里出现两个图标，说明同一个会话里跑了两个进程：
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='PowerSwitch.exe'" |
+  Select-Object ProcessId, SessionId, ParentProcessId
+```
+
+按 `SessionId` 分组，同一组里有多于一个就是重复。正常情况应该是**每个会话恰好一个**。1.2.1 之前的版本因为互斥量用了 `Global\` 且失败分支会继续启动，多用户登录时会出现这种情况；升级到 1.2.1 即可。
+
+**状态条显示「自动切换：只读」**
+
+说明本会话的实例不是驱动者（多会话共存时的正常现象）。看 `engine.leader` 的内容 `pid|会话|时间` 就知道是哪个会话在驱动。在只读会话里点方案仍然有效 —— 请求会通过 `switch.request` 交给驱动者执行，约 2 秒生效。
+
 **设置了「退出」但图标又回来了**
 
 `tray.stopped` 标记只挡 30 分钟，且重新手动启动会清掉它。要长期停用，请禁用计划任务：
@@ -301,6 +347,7 @@ PowerSwitch/
 │   ├── PowerNative.cs            # P/Invoke：电源 API、CPU 采样
 │   ├── PowerScheme.cs            # 方案 GUID 与名称映射
 │   ├── RdpMonitor.cs             # 远程桌面会话检测（WTS API + 会话变更通知）
+│   ├── EngineLeader.cs           # 多会话下的驱动者选举与切换请求通道
 │   ├── AppIcon.cs                # 图标统一入口（托盘与窗口共用）
 │   ├── AppConfig.cs              # 配置模型 + 扁平 JSON 读写
 │   ├── SettingsForm.cs           # 设置窗口（分组卡片 + 实时状态条）
@@ -349,7 +396,8 @@ Remove-Item C:\ProgramData\PowerSwitch -Recurse -Force
 
 | 版本 | 目标运行时 | exe 体积 | 目标机依赖 |
 |---|---|---|---|
-| `v1.2.0`（当前） | .NET 8（框架依赖 + 单文件） | 1.15 MB | 需装 Desktop Runtime 8.x |
+| `v1.2.1`（当前） | .NET 8（框架依赖 + 单文件） | 1.16 MB | 需装 Desktop Runtime 8.x |
+| `v1.2.0` | .NET 8（框架依赖 + 单文件） | 1.15 MB | 需装 Desktop Runtime 8.x |
 | [`v1.1.2`](https://github.com/Chaconez/PowerSwitch.NET/tree/v1.1.2) | .NET Framework 4.0 | 866 KB | 无，Windows 自带 |
 
 功能上两版等价，差别只在运行时。之所以迁到 .NET 8：能直接用现代 C#、`dotnet publish` 一条命令出单文件、不用再维护手写 `csc.exe` 调用链。代价是目标机多了 55 MB 运行时这一前提 —— 如果这个前提不能接受，用 `v1.1.2` 就好。

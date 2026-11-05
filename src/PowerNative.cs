@@ -62,15 +62,19 @@ namespace PowerSwitch
         }
 
         /// <summary>切换电源方案。返回 true 表示系统接受了这次切换。</summary>
+        /// <summary>最近一次 SetActiveScheme 的返回码，0 表示成功。用于区分「没权限」和「偶发失败」。</summary>
+        public static uint LastSchemeError { get; private set; }
+
         public static bool SetActiveScheme(Guid scheme)
         {
             try
             {
                 Guid g = scheme;
                 uint rc = PowerSetActiveScheme(IntPtr.Zero, ref g);
+                LastSchemeError = rc;
                 if (rc != ERROR_SUCCESS)
                 {
-                    Logger.Warn("PowerSetActiveScheme 返回 0x" + rc.ToString("X8"));
+                    Logger.Warn("PowerSetActiveScheme 返回 0x" + rc.ToString("X8") + "（" + DescribeLastError((int)rc) + "）");
                     return false;
                 }
                 return true;

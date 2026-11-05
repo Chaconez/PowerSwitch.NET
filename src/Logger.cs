@@ -13,12 +13,42 @@ namespace PowerSwitch
         private static readonly object Sync = new object();
         private static string _logPath;
         private static long _maxBytes = 5L * 1024L * 1024L;
+        private static bool _fellBack;
 
         public static void Init(string logPath, int maxSizeMb)
         {
             _logPath = logPath;
             if (maxSizeMb < 1) { maxSizeMb = 1; }
             _maxBytes = (long)maxSizeMb * 1024L * 1024L;
+            _fellBack = false;
+        }
+
+        /// <summary>
+        /// 主日志写不进去时，退到「按会话区分」的日志文件。
+        ///
+        /// 触发场景：多用户共用同一个 ProgramData 目录时，日志文件的属主是
+        /// 先创建它的那个账户（常见是 SYSTEM 或管理员），其他账户只有读权限。
+        /// 不降级的话，非属主会话的实例会彻底哑掉 —— 驱动者没有日志，等于无法排查。
+        /// </summary>
+        private static void FallbackToSessionLog()
+        {
+            if (_fellBack || string.IsNullOrEmpty(_logPath)) { return; }
+            _fellBack = true;
+            try
+            {
+                int sid = System.Diagnostics.Process.GetCurrentProcess().SessionId;
+                string dir = Path.GetDirectoryName(_logPath);
+                string name = Path.GetFileNameWithoutExtension(_logPath);
+                string ext = Path.GetExtension(_logPath);
+                _logPath = Path.Combine(dir, name + ".session" + sid + ext);
+                // 直接写一行，让降级本身留下痕迹
+                string line = "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "] [WARN] 主日志不可写，已切换到 " +
+                              Path.GetFileName(_logPath) + Environment.NewLine;
+                File.AppendAllText(_logPath, line, Encoding.UTF8);
+            }
+            catch
+            {
+            }
         }
 
         public static void Info(string message) { Write("INFO", message); }
@@ -65,7 +95,20 @@ namespace PowerSwitch
                 }
                 catch
                 {
-                    // 日志不可写时保持静默：主功能优先。
+                    // 主日志写不进去（多半是别的账户创建的、当前账户只有读权限）：
+                    // 降级到按会话命名的日志，再试一次。仍然失败就静默 —— 主功能优先。
+                    if (!_fellBack)
+                    {
+                        FallbackToSessionLog();
+                        try
+                        {
+                            string line2 = "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "] [" + level + "] " + message + Environment.NewLine;
+                            File.AppendAllText(_logPath, line2, Encoding.UTF8);
+                        }
+                        catch
+                        {
+                        }
+                    }
                 }
             }
         }

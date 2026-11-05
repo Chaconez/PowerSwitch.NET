@@ -24,6 +24,7 @@ namespace PowerSwitch
         private readonly NotifyIcon _icon;
         private readonly ContextMenuStrip _menu;
         private readonly System.Threading.Timer _tickTimer;
+        private readonly System.Threading.Timer _reqTimer;
         private readonly System.Windows.Forms.Timer _uiTimer;
         private readonly SynchronizationContext _uiContext;
         private readonly TaskbarWatcher _watcher;
@@ -46,6 +47,18 @@ namespace PowerSwitch
             _uiContext = SynchronizationContext.Current;
             _engine = new PowerEngine(Paths.DataDir);
             _engine.Changed += OnEngineChanged;
+
+            // 全机电源方案只能有一个实例说了算。抢到就是驱动者，
+            // 抢不到就进只读模式：照样显示状态，但不改方案、不写状态文件。
+            EngineLeader.TryAcquire();
+            _engine.IsDriver = EngineLeader.IsLeader;
+            if (!_engine.IsDriver)
+            {
+                int lsid = EngineLeader.LeaderSession;
+                Logger.Info(lsid > 0
+                    ? "本会话为只读实例，电源方案由会话 " + lsid + " 驱动"
+                    : "本会话为只读实例，电源方案由其他会话驱动");
+            }
 
             _menu = BuildMenu(out _miStatus, out _miRdp, out _miPause, out _miResume, out _miPauseUntil);
             _menu.Opening += OnMenuOpening;
@@ -70,6 +83,10 @@ namespace PowerSwitch
 
             // 后台线程跑引擎：采样会阻塞数秒，绝不能在 UI 线程上做
             _tickTimer = new System.Threading.Timer(OnTickTimer, null, 3000, 60000);
+
+            // 只读会话提交的切换请求由驱动者消费。2 秒一轮，
+            // 保证在非驱动会话里点「节能/平衡」也有及时反馈，不用等 60 秒周期。
+            _reqTimer = new System.Threading.Timer(OnReqTimer, null, 2000, 2000);
 
             // UI 侧轻量刷新：图标与提示文字
             _uiTimer = new System.Windows.Forms.Timer();
@@ -219,6 +236,19 @@ namespace PowerSwitch
             _ticking = true;
             try
             {
+                // 驱动者退出（会话注销 / 进程被杀）后互斥量会消失，
+                // 只读实例在这里捡回来，不用重启托盘。
+                if (!EngineLeader.IsLeader)
+                {
+                    if (EngineLeader.TryAcquire())
+                    {
+                        Logger.Info("接管电源方案驱动权（原驱动者已退出）");
+                    }
+                }
+
+                _engine.IsDriver = EngineLeader.IsLeader;
+                if (_engine.IsDriver) { EngineLeader.Heartbeat(); }
+
                 _engine.Tick();
             }
             catch (Exception ex)
@@ -228,6 +258,29 @@ namespace PowerSwitch
             finally
             {
                 _ticking = false;
+            }
+        }
+
+        /// <summary>驱动者侧的请求泵：把只读会话提交的切换意图执行掉。</summary>
+        private void OnReqTimer(object state)
+        {
+            if (_disposed) { return; }
+            try
+            {
+                // 顺便在这里维持选举状态：驱动者退出后 2 秒内就能被别人接手，
+                // 不用等 60 秒的引擎周期。
+                if (!EngineLeader.IsLeader) { EngineLeader.TryAcquire(); }
+                _engine.IsDriver = EngineLeader.IsLeader;
+
+                if (_engine.IsDriver)
+                {
+                    EngineLeader.Heartbeat();
+                    _engine.PumpRequests();
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("处理切换请求异常: " + Logger.Describe(ex));
             }
         }
 
@@ -556,10 +609,13 @@ namespace PowerSwitch
                 _disposed = true;
                 try { if (_rdp != null) { _rdp.Dispose(); } } catch { }
                 try { if (_tickTimer != null) { _tickTimer.Dispose(); } } catch { }
+                try { if (_reqTimer != null) { _reqTimer.Dispose(); } } catch { }
                 try { if (_uiTimer != null) { _uiTimer.Dispose(); } } catch { }
                 try { if (_watcher != null) { _watcher.ReleaseHandle(); } } catch { }
                 try { if (_icon != null) { _icon.Visible = false; _icon.Dispose(); } } catch { }
                 try { if (_menu != null) { _menu.Dispose(); } } catch { }
+                // 让出驱动权：别的会话的只读实例下一轮就能接手，不必等进程彻底消失
+                try { EngineLeader.Release(); } catch { }
             }
             base.Dispose(disposing);
         }

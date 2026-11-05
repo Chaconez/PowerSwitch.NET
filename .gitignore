@@ -10,7 +10,10 @@ obj/
 power_config.json
 power_switch.log
 power_switch.log.*
+power_switch.session*.log
 power_switch_state.json
+engine.leader
+switch.request
 watchdog.log
 watchdog.log.*
 automation.paused

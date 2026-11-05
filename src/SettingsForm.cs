@@ -454,7 +454,17 @@ namespace PowerSwitch
             catch { }
             _lMem.Text = "内存：" + mb + " MB";
 
-            if (_engine.IsRemoteOverrideActive)
+            if (!_engine.IsDriver)
+            {
+                // 只读实例：多会话共存时，只有一个实例真正驱动电源方案。
+                // 这里必须说清楚，否则用户点「节能」没反应会以为是 bug。
+                int sid = EngineLeader.LeaderSession;
+                _lAuto.Text = "自动切换：只读";
+                _lAuto.ForeColor = CSub;
+                _lJudge.Text = "判定：" + JudgeText(cfg);
+                _lSince.Text = sid > 0 ? "驱动：会话 " + sid : "驱动：其他会话";
+            }
+            else if (_engine.IsRemoteOverrideActive)
             {
                 _lAuto.Text = "自动切换：远程桌面锁定";
                 _lAuto.ForeColor = CBlue;

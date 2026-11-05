@@ -11,9 +11,16 @@ namespace PowerSwitch
     internal static class Program
     {
         /// <summary>
-        /// 与旧 PowerShell 托盘使用同一个互斥量名，这样升级期间不会出现两个图标。
+        /// 单实例互斥量。**会话级**，不加 Global\ 前缀。
+        ///
+        /// 看门狗的设计是「每个登录会话各拉一个实例」，让每个用户都能看到托盘图标，
+        /// 所以这里必须是会话级。曾经用的是 Global\PowerSwitchTray，结果第二个用户
+        /// 登录时打不开别人创建的全局对象（UnauthorizedAccessException），
+        /// 而当时的异常分支选择了「继续启动」，直接导致同一托盘里出现两个图标。
+        ///
+        /// 电源方案的全机仲裁由 EngineLeader 单独负责，和这个互斥量是两件事。
         /// </summary>
-        private const string MutexName = "Global\\PowerSwitchTray";
+        private const string MutexName = "PowerSwitchTray";
 
         [STAThread]
         private static void Main(string[] args)
@@ -40,13 +47,16 @@ namespace PowerSwitch
             catch (Exception ex)
             {
                 Logger.Init(Paths.LogFile, 5);
-                Logger.Error("创建互斥量失败（继续启动）", ex);
-                createdNew = true;
+                Logger.Error("创建互斥量失败，改用进程探测判断单实例", ex);
+                // 互斥量不可用时退化成「同会话内有没有别的同名进程」。
+                // 绝不能再像以前那样无条件继续启动 —— 那等于放弃单实例保护。
+                createdNew = !HasInstanceInThisSession();
             }
 
             if (!createdNew)
             {
-                // 已有实例在跑：直接退出，避免出现两个托盘图标
+                // 本会话已有实例在跑：直接退出，避免同一个托盘里出现两个图标
+                Logger.Info("本会话已有实例在运行，本次启动退出");
                 return;
             }
 
@@ -119,6 +129,49 @@ namespace PowerSwitch
                 {
                 }
             }
+        }
+
+        /// <summary>
+        /// 同会话内是否已有另一个 PowerSwitch 进程。互斥量失效时的兜底判据。
+        /// 只看同会话 —— 别的会话里跑着实例是正常现象（每个会话一个托盘图标）。
+        /// </summary>
+        private static bool HasInstanceInThisSession()
+        {
+            try
+            {
+                int me;
+                int mySession;
+                using (Process self = Process.GetCurrentProcess())
+                {
+                    me = self.Id;
+                    mySession = self.SessionId;
+                }
+
+                Process[] all = Process.GetProcessesByName("PowerSwitch");
+                try
+                {
+                    foreach (Process p in all)
+                    {
+                        try
+                        {
+                            if (p.Id != me && p.SessionId == mySession) { return true; }
+                        }
+                        catch
+                        {
+                            // 进程可能刚好退出，忽略
+                        }
+                    }
+                }
+                finally
+                {
+                    foreach (Process p in all) { try { p.Dispose(); } catch { } }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("进程探测失败，按无实例处理: " + Logger.Describe(ex));
+            }
+            return false;
         }
 
         private static void OnThreadException(object sender, ThreadExceptionEventArgs e)
